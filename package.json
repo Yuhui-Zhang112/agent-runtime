@@ -1,0 +1,22 @@
+{
+  "name": "agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "从 0 到 1 复现的生产级 AI 编程智能体运行时内核",
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "smoke": "tsx src/dev/smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

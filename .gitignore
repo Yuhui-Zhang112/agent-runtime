@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 密钥 —— 最重要的一条，API key 绝不能进版本库
+.env
+.env.*
+!.env.example
+
+# 构建产物
+dist/
+build/
+*.tsbuildinfo
+
+# 运行期产出（Trace / Eval 结果，体积大且可再生）
+traces/
+runs/
+eval-results/
+*.jsonl
+
+# 日志与系统文件
+*.log
+.DS_Store
