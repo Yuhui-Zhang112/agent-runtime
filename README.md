@@ -1,5 +1,7 @@
 # agent-runtime
 
+![CI](https://github.com/YOUR_USERNAME/agent-runtime/actions/workflows/ci.yml/badge.svg)
+
 从 0 到 1 复现的生产级 AI 编程智能体运行时内核。参考蓝本是 Claude Code 的源码快照（`~/Desktop/src`，51 万行）。
 
 **当前进度：Phase 0 完成** —— 流式调用内核可用，终端可对话。
