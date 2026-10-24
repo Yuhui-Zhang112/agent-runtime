@@ -8,7 +8,14 @@
  *   npm run smoke:tool
  */
 
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ReadTool } from '../tools/ReadTool.js'
+import { GlobTool } from '../tools/GlobTool.js'
+import { GrepTool } from '../tools/GrepTool.js'
+import { WriteTool } from '../tools/WriteTool.js'
+import { EditTool } from '../tools/EditTool.js'
 import { ToolRegistry, defineTool, runTool, toToolSpec, type ToolContext } from '../core/tool.js'
 import { z } from 'zod'
 import type { ContentBlock } from '../types/message.js'
@@ -55,6 +62,45 @@ async function main(): Promise<void> {
     },
   })
 
+  // ── 后半部分：Glob / Grep / Write / Edit ────────────────
+  const tmp = mkdtempSync(join(tmpdir(), 'agent-runtime-'))
+  const tmpCtx: ToolContext = { cwd: tmp }
+
+  const globAll = await runTool(GlobTool, { pattern: 'src/**/*.ts' }, ctx)
+  const globNone = await runTool(GlobTool, { pattern: 'src/**/*.rb' }, ctx)
+
+  const grepHit = await runTool(GrepTool, { pattern: 'runAgent', include: '*.ts' }, ctx)
+  const grepBad = await runTool(GrepTool, { pattern: '([unclosed', include: '*.ts' }, ctx)
+
+  const newFile = 'notes/hello.txt'
+  const write1 = await runTool(WriteTool, { path: newFile, content: 'alpha\nbeta\nalpha\n' }, tmpCtx)
+  const write2 = await runTool(WriteTool, { path: newFile, content: 'again' }, tmpCtx)
+
+  const editUnique = await runTool(
+    EditTool,
+    { path: newFile, oldString: 'beta', newString: 'BETA' },
+    tmpCtx,
+  )
+  const editMissing = await runTool(
+    EditTool,
+    { path: newFile, oldString: 'not-exist', newString: 'x' },
+    tmpCtx,
+  )
+  const editAmbiguous = await runTool(
+    EditTool,
+    { path: newFile, oldString: 'alpha', newString: 'X' },
+    tmpCtx,
+  )
+  const editAll = await runTool(
+    EditTool,
+    { path: newFile, oldString: 'alpha', newString: 'X', replaceAll: true },
+    tmpCtx,
+  )
+  const finalContent = readFileSync(join(tmp, newFile), 'utf8')
+  const escape = await runTool(WriteTool, { path: '../../escape.txt', content: 'x' }, tmpCtx)
+
+  writeFileSync(join(tmp, 'dummy.txt'), 'x')
+
   const checks: Array<[string, boolean, string]> = [
     ['工具被注册', registry.has('Read'), registry.list().map((t) => t.name).join(',')],
     ['生成 JSON Schema', spec!.name === 'Read' && 'path' in props, Object.keys(props).join(',')],
@@ -66,6 +112,18 @@ async function main(): Promise<void> {
     ['缺必填参数 → isError', badArgs.isError === true && badArgs.output.includes('不合法'), '被 zod 拦下'],
     ['参数类型错 → isError', badType.isError === true, 'limit 应为数字'],
     ['未声明安全性 → 默认 false', forgot.isReadOnly === false && forgot.isConcurrencySafe === false, 'fail-closed'],
+    ['Glob 找到 ts 文件', !globAll.isError && globAll.output.includes('runAgent.ts'), globAll.output.split('\n')[0] ?? ''],
+    ['Glob 无匹配不报错', !globNone.isError && globNone.output.includes('没有匹配'), globNone.output],
+    ['Glob 跳过 node_modules', !globAll.output.includes('node_modules'), '依赖目录已排除'],
+    ['Grep 命中内容', !grepHit.isError && grepHit.output.includes('runAgent.ts'), grepHit.output.split('\n')[1]?.slice(0, 40) ?? ''],
+    ['Grep 非法正则 → isError', grepBad.isError === true, '被拦下'],
+    ['Write 新建成功', !write1.isError && write1.output.includes('已创建'), write1.output],
+    ['Write 拒绝覆盖已有文件', write2.isError === true && write2.output.includes('Edit'), '引导改用 Edit'],
+    ['Edit 唯一匹配可改', !editUnique.isError && finalContent.includes('BETA'), 'beta → BETA'],
+    ['Edit 找不到原文 → isError', editMissing.isError === true, '提示确认缩进'],
+    ['Edit 多处匹配 → 拒绝', editAmbiguous.isError === true && editAmbiguous.output.includes('2 次'), '逼模型写精确'],
+    ['Edit replaceAll 生效', !editAll.isError && !finalContent.includes('alpha'), '两处都替换'],
+    ['路径越界被拦截', escape.isError === true && escape.output.includes('超出工作目录'), '不许跑出 cwd'],
   ]
 
   console.log('\n  冒烟测试 —— 工具系统\n')

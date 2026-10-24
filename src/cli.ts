@@ -16,13 +16,20 @@ import { OpenAICompatProvider } from './api/openai.js'
 import { runAgent, type TurnTrace } from './core/runAgent.js'
 import { ToolRegistry } from './core/tool.js'
 import { ReadTool } from './tools/ReadTool.js'
+import { GlobTool } from './tools/GlobTool.js'
+import { GrepTool } from './tools/GrepTool.js'
+import { WriteTool } from './tools/WriteTool.js'
+import { EditTool } from './tools/EditTool.js'
 import { createUserMessage, type Message } from './types/message.js'
 import type { ModelProvider } from './api/types.js'
 
 const SYSTEM =
   'You are a coding agent running in a terminal. ' +
-  'You can call tools to inspect the user\'s project. ' +
-  'Prefer reading files before answering questions about code. ' +
+  'You have tools: Glob (find files), Grep (search content), Read (read file), ' +
+  'Write (create NEW file only), Edit (modify existing file).\n' +
+  'Rules: explore with Glob/Grep/Read before answering about code. ' +
+  'Write refuses to overwrite existing files - use Edit for those. ' +
+  'Edit requires oldString to be unique in the file. ' +
   'Be concise and direct.'
 
 // ── 环境变量 ────────────────────────────────────────────────
@@ -84,7 +91,7 @@ const C = {
 async function main(): Promise<void> {
   loadDotEnv()
   const { provider, model } = resolveProvider()
-  const tools = new ToolRegistry().register(ReadTool)
+  const tools = new ToolRegistry().register(ReadTool, GlobTool, GrepTool, WriteTool, EditTool)
 
   const messages: Message[] = []
   const totals = { turns: 0, toolCalls: 0, input: 0, output: 0, cost: 0 }
