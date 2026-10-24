@@ -87,13 +87,40 @@ export function toBlockParam(block: ContentBlock): Record<string, unknown> {
   }
 }
 
+/** 值得重试的 HTTP 状态码（服务端临时故障） */
+export const RETRYABLE_STATUS = new Set([
+  408, // Request Timeout
+  409, // Conflict（多为并发写冲突，重试通常能过）
+  429, // Too Many Requests —— 限流，最常见的重试原因
+  500, 502, 503, 504, // 服务端错误与网关问题
+  522, 524, // Cloudflare 超时类
+  529, // Anthropic overloaded_error
+])
+
+export function statusIsRetryable(status?: number): boolean {
+  return status !== undefined && RETRYABLE_STATUS.has(status)
+}
+
+/**
+ * provider 抛出的错误。
+ * status 与 retryable 是重试策略的唯一判据 —— 各 provider 负责把自家 SDK
+ * 的错误翻译成这个形状，重试逻辑就不需要认识任何一家厂商的错误类型。
+ *
+ * retryable 不显式给时**按 status 自动推导**。这不是偷懒，是防呆：
+ * 否则 `new ProviderError('限流', 429)` 会因为默认 false 而被判成不可重试，
+ * 于是重试机制看起来存在、实际一次都不触发 —— 这种 bug 极难发现。
+ */
 export class ProviderError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number,
-    readonly retryable = false,
-  ) {
+  readonly status?: number
+  readonly retryable: boolean
+  /** 服务端建议的重试等待（来自 Retry-After 头）。有它就用它，比自己算的准 */
+  readonly retryAfterMs?: number
+
+  constructor(message: string, status?: number, retryable?: boolean, retryAfterMs?: number) {
     super(message)
     this.name = 'ProviderError'
+    this.status = status
+    this.retryable = retryable ?? statusIsRetryable(status)
+    this.retryAfterMs = retryAfterMs
   }
 }

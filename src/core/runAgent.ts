@@ -22,16 +22,22 @@
  *     isConcurrencySafe 的可以一起跑，会改东西的必须独占。
  *     并发规则全在 core/toolExecution.ts，这里只负责调用。
  *     无论怎么并发，结果顺序都必须与模型请求顺序一致。
+ *
+ *  6. 【网络一定会抖】限流、过载、连接重置都是正常现象，不该让任务崩掉。
+ *     重试包在"整轮"外面：流式读到一半失败时丢弃已收快照、整轮重来。
+ *     之所以安全，是因为此时还没把任何 assistant 消息推进历史，
+ *     不会留下无人配对的 tool_use（详见 core/withRetry.ts）。
  */
 
 import { callModel, estimateCostUSD } from './callModel.js'
+import { withRetry, type RetryPolicy, type RetryInfo } from './withRetry.js'
 import {
   executeToolUses,
   type ExecutedTool,
   type ToolUseRef,
 } from './toolExecution.js'
 import type { ToolContext, ToolRegistry } from './tool.js'
-import type { ModelProvider } from '../api/types.js'
+import { ProviderError, type ModelProvider } from '../api/types.js'
 import {
   createUserMessage,
   estimateTokens,
@@ -69,6 +75,8 @@ export interface TurnTrace {
   toolMs: number
   /** 本轮最多有几个工具同时在跑（1 = 全串行） */
   maxConcurrency: number
+  /** 本轮模型调用重试了几次。Eval 里"重试率"是重要的稳定性指标 */
+  retries: number
 }
 
 export interface Tracer {
@@ -95,6 +103,10 @@ export interface RunAgentOptions {
   maxParallel?: number
   /** 工具开始/结束的实时事件，UI 用它显示进度 */
   onToolEvent?: (e: ToolEvent) => void
+  /** 重试策略。不传就用 DEFAULT_RETRY_POLICY（3 次、500ms 起、8s 封顶） */
+  retry?: Partial<RetryPolicy>
+  /** 每次决定重试时回调，用于打印"网络抖动，第 N 次重试…" */
+  onRetry?: (info: RetryInfo) => void
 }
 
 /** 工具执行事件。phase=start 时只有 id/name/wave；phase=end 时带完整结果 */
@@ -136,6 +148,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     maxToolResultChars = DEFAULT_MAX_RESULT_CHARS,
     maxParallel = DEFAULT_MAX_PARALLEL,
     onToolEvent,
+    retry,
+    onRetry,
   } = opts
 
   const traces: TurnTrace[] = []
@@ -145,28 +159,46 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     if (signal?.aborted) return finish('aborted', turn - 1, messages, traces)
 
     // ① 问模型（流式）。最后一个快照是终态
+    //
+    //    重试包在"整轮"外面而不是流内部：流式读到一半失败时，
+    //    已收到的快照全部丢弃、整轮重来。这是安全的 —— 我们还没有把任何
+    //    半成品 assistant 消息推进历史，所以不会留下无人配对的 tool_use。
     const startedAt = Date.now()
     let assistant: AssistantMessage
+    let retries = 0
     try {
-      let last: AssistantMessage | undefined
-      for await (const snap of callModel(
-        provider,
-        {
-          model,
-          system,
-          messages,
-          tools: tools.specs(),
-          maxTokens,
-          signal,
+      assistant = await withRetry(async () => {
+        let last: AssistantMessage | undefined
+        for await (const snap of callModel(
+          provider,
+          {
+            model,
+            system,
+            messages,
+            tools: tools.specs(),
+            maxTokens,
+            signal,
+          },
+          { parentUuid: messages.at(-1)?.uuid ?? null },
+        )) {
+          last = snap
+        }
+        // 空响应是个真实存在的坑：某些 provider 偶尔返回一条什么都没有的消息。
+        // 不算成功，标成可重试让它再来一次
+        if (!last || last.message.content.length === 0) {
+          throw new ProviderError('模型返回了空响应', undefined, true)
+        }
+        return last
+      }, {
+        ...retry,
+        signal,
+        onRetry: (info) => {
+          retries = info.attempt
+          onRetry?.(info)
         },
-        { parentUuid: messages.at(-1)?.uuid ?? null },
-      )) {
-        last = snap
-      }
-      if (!last) return finish('error', turn - 1, messages, traces, new Error('模型没有返回任何内容'))
-      assistant = last
+      })
     } catch (err) {
-      // 网络错误：不把半成品消息推进历史，避免留下无人配对的 tool_use
+      // 重试也救不回来：不把半成品消息推进历史，避免留下无人配对的 tool_use
       return finish(
         'error',
         turn - 1,
@@ -184,7 +216,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
     // ② 不再要工具 → 这一轮就是最终答案，循环结束
     if (toolUses.length === 0) {
-      tracer?.onTurn?.(makeTrace(turn, model, durationMs, assistant, messages, [], 0, usage))
+      tracer?.onTurn?.(makeTrace(turn, model, durationMs, assistant, messages, [], 0, usage, retries))
       return finish('end_turn', turn, messages, traces)
     }
 
@@ -214,7 +246,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     // ④ 把结果作为一条"用户消息"回传，继续下一轮
     messages.push(createUserMessage(resultBlocks, assistant.uuid))
     tracer?.onTurn?.(
-      makeTrace(turn, model, durationMs, assistant, messages, executed, toolMs, usage),
+      makeTrace(turn, model, durationMs, assistant, messages, executed, toolMs, usage, retries),
     )
 
     if (signal?.aborted) return finish('aborted', turn, messages, traces)
@@ -234,6 +266,7 @@ function makeTrace(
   executed: ExecutedTool[],
   toolMs: number,
   usage: AssistantMessage['message']['usage'],
+  retries: number,
 ): TurnTrace {
   const toolResults = executed.map((e) => ({
     toolUseId: e.toolUseId,
@@ -261,6 +294,7 @@ function makeTrace(
     toolResults,
     toolMs,
     maxConcurrency: toolResults.length === 0 ? 0 : Math.max(...perWave.values()),
+    retries,
   }
 }
 

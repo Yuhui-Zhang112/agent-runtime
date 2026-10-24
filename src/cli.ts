@@ -182,6 +182,14 @@ async function main(): Promise<void> {
             console.log(C.dim(`      ✓ ${e.name} ${e.durationMs}ms${flag}`))
           }
         },
+        // 网络抖动时告诉用户"还在救"，而不是让他对着卡住的界面发呆
+        onRetry: (info) => {
+          if (!info.willRetry) return
+          const why = info.error.status ? `HTTP ${info.error.status}` : '网络异常'
+          console.log(
+            C.yellow(`    ⟳ ${why}，${(info.delayMs / 1000).toFixed(1)}s 后第 ${info.attempt} 次重试`),
+          )
+        },
       })
 
       console.log(C.green('agent › ') + result.finalText)

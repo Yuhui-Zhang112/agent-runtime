@@ -32,3 +32,6 @@ jobs:
 
       - name: 冒烟测试 · 并发调度（无需 API key）
         run: npm run smoke:exec
+
+      - name: 冒烟测试 · 重试与退避（无需 API key）
+        run: npm run smoke:retry

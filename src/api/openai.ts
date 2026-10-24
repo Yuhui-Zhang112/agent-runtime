@@ -11,7 +11,8 @@
  */
 
 import type { AssistantMessage, UserMessage } from '../types/message.js'
-import type { ModelProvider, ModelRequest, StreamEvent, StreamDelta } from './types.js'
+import { ProviderError, type ModelProvider, type ModelRequest, type StreamEvent, type StreamDelta } from './types.js'
+import { parseRetryAfter, statusIsRetryable, toProviderError } from './errors.js'
 
 interface OpenAIToolCall {
   index: number
@@ -74,10 +75,19 @@ export class OpenAICompatProvider implements ModelProvider {
       },
       body: JSON.stringify(body),
       ...(req.signal ? { signal: req.signal } : {}),
+    }).catch((err: unknown) => {
+      // fetch 只在"连都没连上"时 reject（DNS 失败、连接重置）。
+      // 必须翻译成 ProviderError，否则重试逻辑只能靠猜错误消息
+      throw toProviderError(err)
     })
 
     if (!res.ok || !res.body) {
-      throw new Error(`OpenAI 兼容接口返回 ${res.status}: ${await res.text()}`)
+      throw new ProviderError(
+        `OpenAI 兼容接口返回 ${res.status}`,
+        res.status,
+        statusIsRetryable(res.status),
+        parseRetryAfter(res.headers.get('retry-after')),
+      )
     }
 
     // ── 块状态机 ──────────────────────────────────────────
@@ -88,6 +98,9 @@ export class OpenAICompatProvider implements ModelProvider {
 
     yield { type: 'message_start' }
 
+    // 流已经开出去了才开始报错（读到一半断线）也要翻译。
+    // 这种情况由 parseSSE 内部兜住并转成 ProviderError：
+    // callModel 会丢弃已收到的快照，所以整轮重试是安全的
     for await (const chunk of parseSSE(res.body)) {
       const choice = chunk.choices?.[0]
 
@@ -176,7 +189,10 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<OpenA
 
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      // 读到一半断线会在这里抛。转成 ProviderError（网络层，可重试）
+      const { done, value } = await reader.read().catch((err: unknown) => {
+        throw toProviderError(err)
+      })
       if (done) break
       buffer += decoder.decode(value, { stream: true })
 

@@ -8,6 +8,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { Usage } from '../types/message.js'
 import { toBlockParam, type ModelProvider, type ModelRequest, type StreamEvent } from './types.js'
+import { toProviderError } from './errors.js'
 
 type MsgParam = Anthropic.MessageParam
 
@@ -48,24 +49,33 @@ export class AnthropicProvider implements ModelProvider {
       input_schema: t.input_schema as Anthropic.Tool.InputSchema,
     }))
 
-    // stream: true 必须放在 body 里，SDK 才会返回 Stream；
-    // APIPromise 是 thenable，await 之后才能异步迭代
-    const stream = await this.client.messages.create(
-      {
-        model: req.model,
-        max_tokens: req.maxTokens,
-        system: req.system,
-        messages,
-        stream: true,
-        ...(tools.length > 0 ? { tools } : {}),
-        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-      },
-      req.signal ? { signal: req.signal } : {},
-    )
+    // 建流阶段的错误（401/429/连不上）在这里抛。
+    // 流开始之后的错误由下面的 for-await 兜住 —— 两种情况都要翻译成
+    // ProviderError，重试策略只认这一种类型
+    const stream = await this.client.messages
+      .create(
+        {
+          model: req.model,
+          max_tokens: req.maxTokens,
+          system: req.system,
+          messages,
+          stream: true,
+          ...(tools.length > 0 ? { tools } : {}),
+          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+        },
+        req.signal ? { signal: req.signal } : {},
+      )
+      .catch((err: unknown) => {
+        throw toProviderError(err)
+      })
 
-    for await (const event of stream) {
-      const translated = translate(event)
-      if (translated) yield translated
+    try {
+      for await (const event of stream) {
+        const translated = translate(event)
+        if (translated) yield translated
+      }
+    } catch (err) {
+      throw toProviderError(err)
     }
   }
 }
