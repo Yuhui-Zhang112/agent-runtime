@@ -26,3 +26,6 @@ jobs:
 
       - name: 冒烟测试 · 工具系统（无需 API key）
         run: npm run smoke:tool
+
+      - name: 冒烟测试 · 主循环（用剧本模型，无需 API key）
+        run: npm run smoke:agent
