@@ -21,5 +21,8 @@ jobs:
       - name: 类型检查
         run: npm run typecheck
 
-      - name: 冒烟测试（无需 API key）
+      - name: 冒烟测试 · 流式内核（无需 API key）
         run: npm run smoke
+
+      - name: 冒烟测试 · 工具系统（无需 API key）
+        run: npm run smoke:tool

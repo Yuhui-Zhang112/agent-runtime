@@ -7,12 +7,14 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "smoke": "tsx src/dev/smoke.ts",
+    "smoke:tool": "tsx src/dev/smokeTool.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
