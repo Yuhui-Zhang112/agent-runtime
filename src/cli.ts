@@ -2,7 +2,8 @@
  * Phase 1 入口：带工具的主循环 REPL
  *
  * 与 Phase 0 的区别：这里不再是"一问一答"，而是 runAgent 主循环 ——
- * 模型可以连续调用工具（目前有 Read），拿到结果后再继续，直到它自己说结束。
+ * 模型可以连续调用工具，拿到结果后再继续，直到它自己说结束。
+ * 只读工具（Glob / Grep / Read）会并发执行，写操作（Write / Edit）独占执行。
  *
  * 命令：/exit 退出 · /stats 累计用量 · /clear 清空历史 · /tools 看有哪些工具
  */
@@ -152,6 +153,7 @@ async function main(): Promise<void> {
         messages,
         signal: controller.signal,
         maxTurns: 25,
+        maxParallel: 8,
         tracer: {
           onTurn: (t: TurnTrace) => {
             totals.turns += 1
@@ -160,9 +162,25 @@ async function main(): Promise<void> {
             totals.output += t.outputTokens
             totals.cost += t.costUSD
             if (t.toolUses.length > 0) {
-              console.log(C.dim(`    第 ${t.turn} 轮 · 调用 ${t.toolUses.map((u) => u.name).join(', ')}`))
+              const parallel =
+                t.maxConcurrency > 1 ? ` ×${t.maxConcurrency} 并发` : ''
+              console.log(
+                C.dim(
+                  `    第 ${t.turn} 轮 · 调用 ${t.toolUses.map((u) => u.name).join(', ')}${parallel}` +
+                    ` · 工具耗时 ${t.toolMs}ms · 上下文 ${t.contextTokens}`,
+                ),
+              )
             }
           },
+        },
+        // 单个工具的实时进度。只读工具是并发跑的，所以这里会看到"同时开始"
+        onToolEvent: (e) => {
+          if (e.phase === 'start') {
+            console.log(C.dim(`      ⋯ ${e.name}`))
+          } else {
+            const flag = e.isError ? C.yellow(' ✗') : ''
+            console.log(C.dim(`      ✓ ${e.name} ${e.durationMs}ms${flag}`))
+          }
         },
       })
 

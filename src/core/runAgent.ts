@@ -17,10 +17,20 @@
  *
  *  4. 【策略可注入】provider / tracer / budgetPolicy 全部从外面传进来。
  *     这样同一套循环既能跑真模型，也能跑剧本模型（做对照实验）。
+ *
+ *  5. 【并发但要守规矩】一轮里模型常要调好几个工具。只读且声明了
+ *     isConcurrencySafe 的可以一起跑，会改东西的必须独占。
+ *     并发规则全在 core/toolExecution.ts，这里只负责调用。
+ *     无论怎么并发，结果顺序都必须与模型请求顺序一致。
  */
 
 import { callModel, estimateCostUSD } from './callModel.js'
-import { runTool, type ToolContext, type ToolRegistry } from './tool.js'
+import {
+  executeToolUses,
+  type ExecutedTool,
+  type ToolUseRef,
+} from './toolExecution.js'
+import type { ToolContext, ToolRegistry } from './tool.js'
 import type { ModelProvider } from '../api/types.js'
 import {
   createUserMessage,
@@ -45,7 +55,20 @@ export interface TurnTrace {
   costUSD: number
   stopReason: string | null
   toolUses: Array<{ id: string; name: string }>
-  toolResults: Array<{ toolUseId: string; isError: boolean; chars: number }>
+  toolResults: Array<{
+    toolUseId: string
+    name: string
+    isError: boolean
+    chars: number
+    /** 单个工具耗时 —— 用来定位"到底哪一步慢" */
+    durationMs: number
+    /** 第几个波次：同一波次 = 并发执行的。用来算"并发省了多少时间" */
+    wave: number
+  }>
+  /** 本轮工具执行的墙钟总耗时 */
+  toolMs: number
+  /** 本轮最多有几个工具同时在跑（1 = 全串行） */
+  maxConcurrency: number
 }
 
 export interface Tracer {
@@ -68,7 +91,19 @@ export interface RunAgentOptions {
   tracer?: Tracer
   /** 单条工具结果的最大字符数 —— 上下文工程的第一道防线 */
   maxToolResultChars?: number
+  /** 一波里最多同时跑几个工具。默认 8 */
+  maxParallel?: number
+  /** 工具开始/结束的实时事件，UI 用它显示进度 */
+  onToolEvent?: (e: ToolEvent) => void
 }
+
+/** 工具执行事件。phase=start 时只有 id/name/wave；phase=end 时带完整结果 */
+export type ToolEvent =
+  | { phase: 'start'; id: string; name: string; wave: number }
+  | ({ phase: 'end' } & ExecutedTool)
+
+/** tool_use 的引用结构（与调度器共用，避免重复定义） */
+export type { ToolUseRef } from './toolExecution.js'
 
 export type StopReason = 'end_turn' | 'max_turns' | 'aborted' | 'error'
 
@@ -82,6 +117,7 @@ export interface RunAgentResult {
 
 const DEFAULT_MAX_TURNS = 20
 const DEFAULT_MAX_RESULT_CHARS = 30_000
+const DEFAULT_MAX_PARALLEL = 8
 
 // ── 主循环 ──────────────────────────────────────────────────
 
@@ -98,6 +134,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     signal,
     tracer,
     maxToolResultChars = DEFAULT_MAX_RESULT_CHARS,
+    maxParallel = DEFAULT_MAX_PARALLEL,
+    onToolEvent,
   } = opts
 
   const traces: TurnTrace[] = []
@@ -146,52 +184,37 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
     // ② 不再要工具 → 这一轮就是最终答案，循环结束
     if (toolUses.length === 0) {
-      tracer?.onTurn?.(
-        makeTrace(turn, model, durationMs, assistant, messages, [], usage),
-      )
+      tracer?.onTurn?.(makeTrace(turn, model, durationMs, assistant, messages, [], 0, usage))
       return finish('end_turn', turn, messages, traces)
     }
 
     // ③ 执行工具。**每一个 tool_use 都必须产出一个 tool_result**
-    const resultBlocks: ContentBlock[] = []
-    const toolResults: TurnTrace['toolResults'] = []
+    //
+    //   并发规则在 toolExecution.ts 里：只读且声明了可并发的工具一起跑，
+    //   会改东西的工具独占。无论怎么并发，返回顺序都跟模型请求顺序一致。
+    const startedToolsAt = Date.now()
+    const executed = await executeToolUses({
+      toolUses,
+      tools,
+      ctx,
+      maxResultChars: maxToolResultChars,
+      maxParallel,
+      onToolStart: (i) => onToolEvent?.({ phase: 'start', ...i }),
+      onToolEnd: (e) => onToolEvent?.({ phase: 'end', ...e }),
+    })
+    const toolMs = Date.now() - startedToolsAt
 
-    for (const tu of toolUses) {
-      let output: string
-      let isError = false
-
-      if (signal?.aborted) {
-        // 被取消：不能真的去执行，但结果位必须补上，否则配对断裂
-        output = '已取消（用户中断）'
-        isError = true
-      } else {
-        const tool = tools.get(tu.name)
-        const res = tool
-          ? await runTool(tool, tu.input, ctx)
-          : { output: `未知工具：${tu.name}。可用工具：${tools.list().map((t) => t.name).join(', ')}`, isError: true }
-        output = res.output
-        isError = res.isError === true
-      }
-
-      if (output.length > maxToolResultChars) {
-        output =
-          output.slice(0, maxToolResultChars) +
-          `\n\n[已截断：原始 ${output.length} 字符，保留前 ${maxToolResultChars} 字符]`
-      }
-
-      resultBlocks.push({
-        type: 'tool_result',
-        tool_use_id: tu.id,
-        content: output,
-        ...(isError ? { is_error: true } : {}),
-      })
-      toolResults.push({ toolUseId: tu.id, isError, chars: output.length })
-    }
+    const resultBlocks: ContentBlock[] = executed.map((e) => ({
+      type: 'tool_result',
+      tool_use_id: e.toolUseId,
+      content: e.output,
+      ...(e.isError ? { is_error: true } : {}),
+    }))
 
     // ④ 把结果作为一条"用户消息"回传，继续下一轮
     messages.push(createUserMessage(resultBlocks, assistant.uuid))
     tracer?.onTurn?.(
-      makeTrace(turn, model, durationMs, assistant, messages, toolResults, usage),
+      makeTrace(turn, model, durationMs, assistant, messages, executed, toolMs, usage),
     )
 
     if (signal?.aborted) return finish('aborted', turn, messages, traces)
@@ -208,9 +231,23 @@ function makeTrace(
   durationMs: number,
   assistant: AssistantMessage,
   messages: Message[],
-  toolResults: TurnTrace['toolResults'],
+  executed: ExecutedTool[],
+  toolMs: number,
   usage: AssistantMessage['message']['usage'],
 ): TurnTrace {
+  const toolResults = executed.map((e) => ({
+    toolUseId: e.toolUseId,
+    name: e.name,
+    isError: e.isError,
+    chars: e.output.length,
+    durationMs: e.durationMs,
+    wave: e.wave,
+  }))
+
+  // 同一波次里有几个工具 = 那一波的实际并发度
+  const perWave = new Map<number, number>()
+  for (const r of toolResults) perWave.set(r.wave, (perWave.get(r.wave) ?? 0) + 1)
+
   return {
     turn,
     model,
@@ -222,6 +259,8 @@ function makeTrace(
     stopReason: assistant.message.stop_reason,
     toolUses: extractToolUses(assistant).map((t) => ({ id: t.id, name: t.name })),
     toolResults,
+    toolMs,
+    maxConcurrency: toolResults.length === 0 ? 0 : Math.max(...perWave.values()),
   }
 }
 

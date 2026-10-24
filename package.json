@@ -9,6 +9,7 @@
     "smoke": "tsx src/dev/smoke.ts",
     "smoke:tool": "tsx src/dev/smokeTool.ts",
     "smoke:agent": "tsx src/dev/smokeAgent.ts",
+    "smoke:exec": "tsx src/dev/smokeExec.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
