@@ -35,3 +35,6 @@ jobs:
 
       - name: 冒烟测试 · 重试与退避（无需 API key）
         run: npm run smoke:retry
+
+      - name: 冒烟测试 · 服务层（真实 HTTP + SSE，无需 API key）
+        run: npm run smoke:server

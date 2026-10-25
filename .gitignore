@@ -19,4 +19,5 @@ eval-results/
 
 # 日志与系统文件
 *.log
+logs/
 .DS_Store

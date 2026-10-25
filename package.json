@@ -6,13 +6,17 @@
   "description": "从 0 到 1 复现的生产级 AI 编程智能体运行时内核",
   "scripts": {
     "dev": "tsx src/cli.ts",
+    "serve": "tsx src/server.ts",
     "smoke": "tsx src/dev/smoke.ts",
     "smoke:tool": "tsx src/dev/smokeTool.ts",
     "smoke:agent": "tsx src/dev/smokeAgent.ts",
     "smoke:exec": "tsx src/dev/smokeExec.ts",
     "smoke:retry": "tsx src/dev/smokeRetry.ts",
+    "smoke:server": "tsx src/dev/smokeServer.ts",
+    "smoke:all": "npm run smoke && npm run smoke:tool && npm run smoke:agent && npm run smoke:exec && npm run smoke:retry && npm run smoke:server",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",

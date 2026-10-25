@@ -1,0 +1,12 @@
+node_modules
+dist
+logs
+traces
+eval-results
+.git
+.github
+.env
+.env.*
+*.jsonl
+*.tsbuildinfo
+README.md
