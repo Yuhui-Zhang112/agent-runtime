@@ -26,6 +26,13 @@ export interface ToolResult {
   isError?: boolean
 }
 
+/**
+ * 风险级别 —— Phase 2 权限系统据此决定「要不要问人」。
+ * read = 只看看；write = 会改文件；execute = 能跑任意命令。
+ * 注意：这是**策略层**的分类，工具内部的硬安全（路径、命令黑名单）不受它影响。
+ */
+export type RiskLevel = 'read' | 'write' | 'execute'
+
 export interface ToolContext {
   /** 当前工作目录 —— 相对路径都基于它解析 */
   cwd: string
@@ -46,6 +53,8 @@ export interface Tool<I = any> {
   isReadOnly: boolean
   /** 能否与其他只读工具并发执行。默认 false = 串行，最安全 */
   isConcurrencySafe: boolean
+  /** 风险级别。默认 execute = 最保守（未声明的工具一律当成最危险） */
+  risk: RiskLevel
   /** 真正的执行逻辑 */
   call(input: I, ctx: ToolContext): Promise<ToolResult>
 }
@@ -56,6 +65,7 @@ export interface ToolDefinition<I> {
   inputSchema: z.ZodType<I>
   isReadOnly?: boolean
   isConcurrencySafe?: boolean
+  risk?: RiskLevel
   call(input: I, ctx: ToolContext): Promise<ToolResult>
 }
 
@@ -65,9 +75,11 @@ export interface ToolDefinition<I> {
  */
 export function defineTool<I>(spec: ToolDefinition<I>): Tool<I> {
   return {
-    isReadOnly: false,
-    isConcurrencySafe: false,
     ...spec,
+    // 所有默认值都取最保守的一档，且用 ?? 防止显式 undefined 把默认值冲掉
+    isReadOnly: spec.isReadOnly ?? false,
+    isConcurrencySafe: spec.isConcurrencySafe ?? false,
+    risk: spec.risk ?? 'execute',
   }
 }
 

@@ -20,6 +20,7 @@ const DEFAULT_MAX_MATCHES = 50
 
 export const GrepTool = defineTool({
   name: 'Grep',
+  risk: 'read',
   description:
     '在文件内容中搜索，返回 `路径:行号: 内容` 形式的命中列表。\n' +
     'pattern 是正则（如 `function\\s+runAgent`）。用 include 限定文件类型以加快速度。',

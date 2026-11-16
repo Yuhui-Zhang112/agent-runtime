@@ -27,6 +27,7 @@
  */
 
 import { runTool, type ToolContext, type ToolRegistry } from './tool.js'
+import type { PermissionDecision, PermissionEngine } from './permissions.js'
 
 /** 一次工具调用请求（从 assistant 消息里摘出来的） */
 export interface ToolUseRef {
@@ -49,6 +50,8 @@ export interface ExecutedTool {
   truncated: boolean
   /** 是否因为中断而根本没执行（补的合成结果） */
   cancelled: boolean
+  /** 是否被权限系统拦下（同样会产出一条 tool_result，配对不许断） */
+  denied?: boolean
 }
 
 export interface ToolExecutionOptions {
@@ -59,6 +62,12 @@ export interface ToolExecutionOptions {
   maxResultChars?: number
   /** 一波里最多同时跑几个。默认 8 —— 防止一次打开 200 个文件句柄把系统拖垮 */
   maxParallel?: number
+  /**
+   * 权限引擎（可选注入）。不传 = 完全按 Phase 1 行为执行，老调用方零改动。
+   * 传入后，一批工具会在**执行前统一预检**：拒绝的也产出配对结果，
+   * 而且审批按顺序问，不会并发弹窗。
+   */
+  permissions?: PermissionEngine
   /** 工具开始/结束的回调，UI 用它显示"正在读 3 个文件…" */
   onToolStart?: (info: { id: string; name: string; wave: number }) => void
   onToolEnd?: (info: ExecutedTool) => void
@@ -127,6 +136,7 @@ export async function executeToolUses(
     ctx,
     maxResultChars = DEFAULT_MAX_RESULT_CHARS,
     maxParallel = DEFAULT_MAX_PARALLEL,
+    permissions,
     onToolStart,
     onToolEnd,
   } = opts
@@ -135,6 +145,21 @@ export async function executeToolUses(
   const results = new Array<ExecutedTool>(toolUses.length)
   const groups = planGroups(toolUses, tools)
 
+  // 权限在**执行之前**统一裁决。按 id 存表，后面并发/独占都不影响取用。
+  // 未知工具按最高风险 execute 处理 —— 认不出来就不能默认信任。
+  const decisionById = new Map<string, PermissionDecision>()
+  if (permissions) {
+    const decisions = await permissions.authorizeBatch(
+      toolUses.map((tu) => ({
+        name: tu.name,
+        input: tu.input,
+        level: tools.get(tu.name)?.risk ?? 'execute',
+      })),
+      ctx.signal,
+    )
+    toolUses.forEach((tu, i) => decisionById.set(tu.id, decisions[i]!))
+  }
+
   let wave = 0
   for (const group of groups) {
     // 每组开始时检查一次中断：被中断后剩下的组不再真的执行
@@ -142,7 +167,7 @@ export async function executeToolUses(
 
     const runOne = async (tu: ToolUseRef): Promise<ExecutedTool> => {
       onToolStart?.({ id: tu.id, name: tu.name, wave })
-      const executed = await runOneTool(tu, tools, ctx, maxResultChars)
+      const executed = await runOneTool(tu, tools, ctx, maxResultChars, decisionById.get(tu.id))
       onToolEnd?.(executed)
       return executed
     }
@@ -169,8 +194,29 @@ async function runOneTool(
   tools: ToolRegistry,
   ctx: ToolContext,
   maxResultChars: number,
+  decision?: PermissionDecision,
 ): Promise<ExecutedTool> {
   const startedAt = Date.now()
+
+  // 权限拒绝：不执行，但**结果位必须有内容**。
+  // 把"为什么被拒、怎么才能被允许"讲清楚，模型才有机会自己换条路走。
+  if (decision && decision.final === 'deny') {
+    return {
+      toolUseId: tu.id,
+      name: tu.name,
+      output:
+        `权限拒绝：${decision.reason}\n` +
+        `目标：${decision.target}\n` +
+        '这次调用没有执行。可以改用只读工具（Glob / Grep / Read）完成任务，' +
+        '或让用户添加允许规则 / 切换权限模式后重试。',
+      isError: true,
+      durationMs: Date.now() - startedAt,
+      wave: -1,
+      truncated: false,
+      cancelled: false,
+      denied: true,
+    }
+  }
 
   // 中断：不执行，但结果位必须有内容
   if (ctx.signal?.aborted) {

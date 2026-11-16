@@ -37,6 +37,7 @@ import {
   type ToolUseRef,
 } from './toolExecution.js'
 import type { ToolContext, ToolRegistry } from './tool.js'
+import type { PermissionEngine } from './permissions.js'
 import { ProviderError, type ModelProvider } from '../api/types.js'
 import {
   createUserMessage,
@@ -77,6 +78,8 @@ export interface TurnTrace {
   maxConcurrency: number
   /** 本轮模型调用重试了几次。Eval 里"重试率"是重要的稳定性指标 */
   retries: number
+  /** 本轮被权限系统拦下的工具数 —— 监控"模型有没有在试探边界" */
+  deniedTools: number
 }
 
 export interface Tracer {
@@ -101,6 +104,8 @@ export interface RunAgentOptions {
   maxToolResultChars?: number
   /** 一波里最多同时跑几个工具。默认 8 */
   maxParallel?: number
+  /** 权限引擎（可选）。不传 = Phase 1 行为；传入后每个工具执行前都会过裁决 */
+  permissions?: PermissionEngine
   /** 工具开始/结束的实时事件，UI 用它显示进度 */
   onToolEvent?: (e: ToolEvent) => void
   /** 重试策略。不传就用 DEFAULT_RETRY_POLICY（3 次、500ms 起、8s 封顶） */
@@ -147,6 +152,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     tracer,
     maxToolResultChars = DEFAULT_MAX_RESULT_CHARS,
     maxParallel = DEFAULT_MAX_PARALLEL,
+    permissions,
     onToolEvent,
     retry,
     onRetry,
@@ -231,6 +237,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       ctx,
       maxResultChars: maxToolResultChars,
       maxParallel,
+      permissions,
       onToolStart: (i) => onToolEvent?.({ phase: 'start', ...i }),
       onToolEnd: (e) => onToolEvent?.({ phase: 'end', ...e }),
     })
@@ -295,6 +302,7 @@ function makeTrace(
     toolMs,
     maxConcurrency: toolResults.length === 0 ? 0 : Math.max(...perWave.values()),
     retries,
+    deniedTools: executed.filter((e) => e.denied === true).length,
   }
 }
 

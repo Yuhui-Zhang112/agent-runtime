@@ -18,6 +18,7 @@ import { resolveInCwd } from './paths.js'
 
 export const WriteTool = defineTool({
   name: 'Write',
+  risk: 'write',
   description:
     '创建一个新文件并写入内容。\n' +
     '重要：只能用于【新建】。修改已存在的文件请用 Edit。\n' +

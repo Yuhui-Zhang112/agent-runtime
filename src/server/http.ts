@@ -23,10 +23,12 @@ import type { AddressInfo } from 'node:net'
 
 import { runAgent, type TurnTrace } from '../core/runAgent.js'
 import type { ToolRegistry } from '../core/tool.js'
+import type { PermissionEngine } from '../core/permissions.js'
 import type { ModelProvider } from '../api/types.js'
 import { createUserMessage, createUuid } from '../types/message.js'
 import { SessionStore, summarize } from './session.js'
 import { JsonlLogger, clip } from './log.js'
+import { ApprovalQueue } from './approvals.js'
 import type { ServerConfig } from './config.js'
 
 export interface ServerDeps {
@@ -34,6 +36,9 @@ export interface ServerDeps {
   provider: ModelProvider
   tools: ToolRegistry
   logger: JsonlLogger
+  /** 可选注入：不传 = Phase 1 行为，老调用方（含全部旧测试）零改动 */
+  permissions?: PermissionEngine
+  approvals?: ApprovalQueue
 }
 
 export interface ListenInfo {
@@ -46,7 +51,11 @@ export class AgentServer {
   private readonly provider: ModelProvider
   private readonly tools: ToolRegistry
   private readonly logger: JsonlLogger
+  private readonly permissions?: PermissionEngine
+  private readonly approvals?: ApprovalQueue
   private readonly sessions = new SessionStore()
+  /** 当前活跃的 SSE 连接。权限事件广播给它们（同一进程内，多个 run 会同时收到） */
+  private readonly sseSinks = new Set<(event: string, data: unknown) => void>()
   private readonly server = createServer((req, res) => {
     void this.handle(req, res)
   })
@@ -60,6 +69,27 @@ export class AgentServer {
     this.provider = deps.provider
     this.tools = deps.tools
     this.logger = deps.logger
+    this.permissions = deps.permissions
+    this.approvals = deps.approvals
+
+    // 把权限裁决接进 SSE 与结构化日志：模型每一次"试探边界"都留痕。
+    this.permissions?.setDecisionListener((d) => {
+      const payload = {
+        tool: d.toolName,
+        target: d.target,
+        final: d.final,
+        reason: d.reason,
+        asked: d.asked,
+        timedOut: d.timedOut,
+      }
+      this.logger.info('permission', payload)
+      this.broadcast('permission', payload)
+    })
+    if (this.approvals) {
+      this.approvals.onRequest = (a) => this.broadcast('permission_request', a)
+      this.approvals.onResolved = (id, decision) =>
+        this.broadcast('permission_resolved', { id, decision })
+    }
   }
 
   /** port 传 0 = 让系统分配空闲端口（测试用） */
@@ -76,6 +106,9 @@ export class AgentServer {
   /** 优雅退出：停止接新请求 → 等在跑的结束（有上限）→ 关闭监听 */
   async close(waitMs = 10_000): Promise<void> {
     this.shuttingDown = true
+    // 挂着的审批一律拒绝，否则在跑的 run 会永远等下去
+    const rejected = this.approvals?.rejectAll() ?? 0
+    if (rejected > 0) this.logger.warn('approvals_rejected_on_close', { count: rejected })
     const deadline = Date.now() + waitMs
     while (this.active > 0 && Date.now() < deadline) {
       await sleep(50)
@@ -89,6 +122,10 @@ export class AgentServer {
 
   get sessionStore(): SessionStore {
     return this.sessions
+  }
+
+  private broadcast(event: string, data: unknown): void {
+    for (const sink of this.sseSinks) sink(event, data)
   }
 
   // ── 路由 ──────────────────────────────────────────────────
@@ -118,6 +155,72 @@ export class AgentServer {
     try {
       if (method === 'GET' && path === '/v1/tools') {
         return sendJson(res, 200, { tools: this.tools.specs() })
+      }
+
+      // ── Phase 2：权限状态、规则、审批 ──────────────────────
+      if (method === 'GET' && path === '/v1/permissions') {
+        return sendJson(
+          res,
+          200,
+          this.permissions
+            ? {
+                enabled: true,
+                ...this.permissions.describe(),
+                pending: this.approvals?.list() ?? [],
+              }
+            : { enabled: false },
+        )
+      }
+
+      if (method === 'POST' && path === '/v1/permissions/rules') {
+        if (!this.permissions) return sendJson(res, 404, { error: '权限系统未启用' })
+        let body: unknown
+        try {
+          body = await readJsonBody(req, this.cfg.maxBodyBytes)
+        } catch (err) {
+          return sendJson(res, 400, { error: String(err instanceof Error ? err.message : err) })
+        }
+        const b = (body ?? {}) as Record<string, unknown>
+        if (
+          typeof b.tool !== 'string' ||
+          b.tool.trim() === '' ||
+          (b.action !== 'allow' && b.action !== 'deny' && b.action !== 'ask')
+        ) {
+          return sendJson(res, 400, { error: '需要 tool: string 与 action: allow | deny | ask' })
+        }
+        if (b.pattern !== undefined && typeof b.pattern !== 'string') {
+          return sendJson(res, 400, { error: 'pattern 必须是字符串' })
+        }
+        const rule = {
+          tool: b.tool,
+          action: b.action as 'allow' | 'deny' | 'ask',
+          ...(typeof b.pattern === 'string' ? { pattern: b.pattern } : {}),
+        }
+        this.permissions.addRule(rule)
+        this.logger.info('permission_rule_added', rule)
+        return sendJson(res, 201, { rule, rules: this.permissions.listRules() })
+      }
+
+      if (method === 'POST' && path === '/v1/approvals') {
+        let body: unknown
+        try {
+          body = await readJsonBody(req, this.cfg.maxBodyBytes)
+        } catch (err) {
+          return sendJson(res, 400, { error: String(err instanceof Error ? err.message : err) })
+        }
+        const b = (body ?? {}) as Record<string, unknown>
+        if (
+          typeof b.id !== 'string' ||
+          b.id === '' ||
+          (b.decision !== 'allow' && b.decision !== 'deny' && b.decision !== 'always')
+        ) {
+          return sendJson(res, 400, { error: '需要 id 与 decision: allow | deny | always' })
+        }
+        const ok = this.approvals?.resolve(b.id, b.decision) ?? false
+        this.logger.info('approval_resolved', { id: b.id, decision: b.decision, ok })
+        return ok
+          ? sendJson(res, 200, { resolved: b.id, decision: b.decision })
+          : sendJson(res, 404, { error: '审批请求不存在或已超时' })
       }
 
       if (method === 'POST' && path === '/v1/sessions') {
@@ -213,6 +316,8 @@ export class AgentServer {
       if (ended) return
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
     }
+    // 这个 run 期间接收权限事件（审批请求、裁决结果）
+    this.sseSinks.add(sse)
 
     log.info('run_start', { text: clip(text) })
     sse('run_start', { runId, sessionId })
@@ -228,6 +333,7 @@ export class AgentServer {
         model: this.cfg.model,
         system: this.cfg.system,
         tools: this.tools,
+        permissions: this.permissions,
         messages: session.messages,
         cwd: this.cfg.cwd,
         maxTurns: this.cfg.maxTurns,
@@ -243,6 +349,7 @@ export class AgentServer {
               toolMs: t.toolMs,
               maxConcurrency: t.maxConcurrency,
               retries: t.retries,
+              deniedTools: t.deniedTools,
               tools: t.toolUses.map((u) => u.name),
             })
             log.info('turn', { turn: t.turn, contextTokens: t.contextTokens, costUSD: t.costUSD })
@@ -283,6 +390,7 @@ export class AgentServer {
       sse('error', { message: String(err) })
     } finally {
       ended = true
+      this.sseSinks.delete(sse)
       this.sessions.release(sessionId)
       this.active -= 1
       res.end()

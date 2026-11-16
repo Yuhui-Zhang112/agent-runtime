@@ -38,3 +38,6 @@ jobs:
 
       - name: 冒烟测试 · 服务层（真实 HTTP + SSE，无需 API key）
         run: npm run smoke:server
+
+      - name: 冒烟测试 · 权限系统（规则 / 审批 / Bash 安全，无需 API key）
+        run: npm run smoke:permission

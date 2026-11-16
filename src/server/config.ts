@@ -11,6 +11,12 @@
  *   想让别人访问，就必须显式配密钥 —— 默认状态永远是"只有本机能用"。
  */
 
+import {
+  PERMISSION_MODES,
+  type PermissionMode,
+  type PermissionRule,
+} from '../core/permissions.js'
+
 export type ProviderKind = 'anthropic' | 'openai'
 
 export interface ServerConfig {
@@ -37,14 +43,23 @@ export interface ServerConfig {
   sessionIdleTTLms: number
   /** 结构化日志目录。null = 只记内存（测试用），不落盘 */
   logDir: string | null
+  /** Phase 2：权限模式 */
+  permissionMode: PermissionMode
+  /** Phase 2：启动时预置的规则（PERMISSION_RULES 环境变量，JSON 数组） */
+  permissionRules: PermissionRule[]
+  /** Phase 2：审批等待上限（ms），超时按拒绝 */
+  approvalTimeoutMs: number
 }
 
 const DEFAULT_SYSTEM =
   'You are a coding agent with tools: Glob (find files), Grep (search content), ' +
-  'Read (read file), Write (create NEW file only), Edit (modify existing file).\n' +
+  'Read (read file), Write (create NEW file only), Edit (modify existing file), ' +
+  'Bash (run a shell command; subject to permission approval).\n' +
   'Rules: explore with Glob/Grep/Read before answering about code. ' +
   'Write refuses to overwrite existing files - use Edit for those. ' +
-  'Edit requires oldString to be unique in the file. Be concise and direct.'
+  'Edit requires oldString to be unique in the file. ' +
+  'A permission denial is a real result: do NOT retry the same command. ' +
+  'Be concise and direct.'
 
 const LOCALHOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
 
@@ -82,6 +97,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxBodyBytes: num(env.MAX_BODY_BYTES, 1_000_000),
     sessionIdleTTLms: num(env.SESSION_IDLE_TTL_MS, 30 * 60 * 1000),
     logDir: env.LOG_DIR?.trim() ? env.LOG_DIR.trim() : null,
+    permissionMode: parsePermissionMode(env.PERMISSION_MODE),
+    permissionRules: parsePermissionRules(env.PERMISSION_RULES),
+    approvalTimeoutMs: num(env.APPROVAL_TIMEOUT_MS, 60_000),
   }
 }
 
@@ -90,4 +108,45 @@ function num(raw: string | undefined, fallback: number): number {
   const n = Number(raw)
   if (!Number.isFinite(n)) throw new Error(`环境变量不是数字：${raw}`)
   return n
+}
+
+/** 权限配置解析一律 fail-closed：写错就拒绝启动，不带着半懂的配置跑起来 */
+function parsePermissionMode(raw: string | undefined): PermissionMode {
+  const v = raw?.trim() || 'default'
+  if (!PERMISSION_MODES.includes(v as PermissionMode)) {
+    throw new Error(`PERMISSION_MODE 只能是 ${PERMISSION_MODES.join(' / ')}，收到：${v}`)
+  }
+  return v as PermissionMode
+}
+
+function parsePermissionRules(raw: string | undefined): PermissionRule[] {
+  if (!raw?.trim()) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('PERMISSION_RULES 不是合法 JSON')
+  }
+  if (!Array.isArray(parsed)) throw new Error('PERMISSION_RULES 必须是数组')
+
+  return parsed.map((r, i): PermissionRule => {
+    if (typeof r !== 'object' || r === null) {
+      throw new Error(`PERMISSION_RULES[${i}] 必须是对象`)
+    }
+    const o = r as Record<string, unknown>
+    if (typeof o.tool !== 'string' || o.tool.trim() === '') {
+      throw new Error(`PERMISSION_RULES[${i}].tool 必须是非空字符串`)
+    }
+    if (o.action !== 'allow' && o.action !== 'deny' && o.action !== 'ask') {
+      throw new Error(`PERMISSION_RULES[${i}].action 只能是 allow / deny / ask`)
+    }
+    if (o.pattern !== undefined && typeof o.pattern !== 'string') {
+      throw new Error(`PERMISSION_RULES[${i}].pattern 必须是字符串`)
+    }
+    return {
+      tool: o.tool,
+      action: o.action,
+      ...(typeof o.pattern === 'string' ? { pattern: o.pattern } : {}),
+    }
+  })
 }

@@ -18,6 +18,7 @@ const MAX_BYTES = 100_000
 
 export const ReadTool = defineTool({
   name: 'Read',
+  risk: 'read',
   description:
     '读取文件内容并返回带行号的文本。用于查看源代码、配置、文档。' +
     '默认读整个文件，可用 offset/limit 分段读取大文件。',

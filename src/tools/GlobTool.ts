@@ -20,6 +20,7 @@ const MAX_RESULTS = 200
 
 export const GlobTool = defineTool({
   name: 'Glob',
+  risk: 'read',
   description:
     '按通配符模式查找文件路径，返回匹配的文件列表。\n' +
     '模式示例：`**/*.ts` 所有 ts 文件；`src/**/*.ts` src 下的 ts；`*.json` 根目录下的 json。\n' +

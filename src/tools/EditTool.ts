@@ -20,6 +20,7 @@ import { resolveInCwd } from './paths.js'
 
 export const EditTool = defineTool({
   name: 'Edit',
+  risk: 'write',
   description:
     '把文件中的一段字符串替换成另一段。\n' +
     'oldString 必须在文件中**唯一**（或显式传 replaceAll）。\n' +
