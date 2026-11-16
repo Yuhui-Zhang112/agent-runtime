@@ -16,6 +16,11 @@ import {
   type PermissionMode,
   type PermissionRule,
 } from '../core/permissions.js'
+import {
+  DEFAULT_COMPACTION_POLICY,
+  resolveCompactionPolicy,
+  type CompactionPolicy,
+} from '../core/compaction.js'
 
 export type ProviderKind = 'anthropic' | 'openai'
 
@@ -49,6 +54,10 @@ export interface ServerConfig {
   permissionRules: PermissionRule[]
   /** Phase 2：审批等待上限（ms），超时按拒绝 */
   approvalTimeoutMs: number
+  /** Phase 3：上下文压缩策略。null = 关闭（对照实验的基线配置） */
+  compaction: CompactionPolicy | null
+  /** Phase 3：每轮 Trace 的落盘目录。null = 只记内存 */
+  traceDir: string | null
 }
 
 const DEFAULT_SYSTEM =
@@ -100,6 +109,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     permissionMode: parsePermissionMode(env.PERMISSION_MODE),
     permissionRules: parsePermissionRules(env.PERMISSION_RULES),
     approvalTimeoutMs: num(env.APPROVAL_TIMEOUT_MS, 60_000),
+    compaction: parseCompaction(env),
+    traceDir: env.TRACE_DIR?.trim() ? env.TRACE_DIR.trim() : null,
   }
 }
 
@@ -108,6 +119,37 @@ function num(raw: string | undefined, fallback: number): number {
   const n = Number(raw)
   if (!Number.isFinite(n)) throw new Error(`环境变量不是数字：${raw}`)
   return n
+}
+
+/**
+ * Phase 3 压缩配置解析。
+ * 与权限配置同一条规矩：写错就拒绝启动（fail-closed），不带着半懂的配置跑起来。
+ * 只给触发阈值、没给预算时自动取阈值一半 —— 避免「改一个参数就因 target >= trigger 报错」。
+ */
+function parseCompaction(env: NodeJS.ProcessEnv): CompactionPolicy | null {
+  const raw = (env.COMPACTION ?? 'on').trim().toLowerCase()
+  if (['off', 'false', '0', 'no'].includes(raw)) return null
+  if (!['on', 'true', '1', 'yes'].includes(raw)) {
+    throw new Error(`COMPACTION 只能是 on / off，收到：${raw}`)
+  }
+
+  const p: Partial<CompactionPolicy> = { enabled: true }
+  const trigger = env.COMPACTION_TRIGGER_TOKENS?.trim()
+  const target = env.COMPACTION_TARGET_TOKENS?.trim()
+  if (trigger) p.triggerTokens = num(trigger, DEFAULT_COMPACTION_POLICY.triggerTokens)
+  if (target) p.targetTokens = num(target, DEFAULT_COMPACTION_POLICY.targetTokens)
+  else if (trigger && p.triggerTokens) p.targetTokens = Math.floor(p.triggerTokens / 2)
+  if (env.COMPACTION_PROTECT_RECENT?.trim()) {
+    p.protectRecentMessages = num(env.COMPACTION_PROTECT_RECENT, DEFAULT_COMPACTION_POLICY.protectRecentMessages)
+  }
+  if (env.COMPACTION_MIN_RESULT_CHARS?.trim()) {
+    p.minResultChars = num(env.COMPACTION_MIN_RESULT_CHARS, DEFAULT_COMPACTION_POLICY.minResultChars)
+  }
+  const recoverable = env.COMPACTION_RECOVERABLE?.trim().toLowerCase()
+  if (recoverable) p.recoverable = !['false', '0', 'no', 'off'].includes(recoverable)
+
+  // 统一在这里做合法性校验，服务启动时就炸，别等跑到第 5 轮才出错
+  return resolveCompactionPolicy(p)
 }
 
 /** 权限配置解析一律 fail-closed：写错就拒绝启动，不带着半懂的配置跑起来 */

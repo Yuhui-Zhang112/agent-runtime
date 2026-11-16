@@ -174,6 +174,32 @@ export function extractToolUses(msg: AssistantMessage): Array<{
     .map((b) => ({ id: b.id, name: b.name, input: b.input }))
 }
 
+/**
+ * 找出所有「有 tool_use 却没有配对 tool_result」的孤儿 id。
+ *
+ * 这是整个项目最重要的一条不变量：少一个结果，下次请求 API 直接 400，
+ * 会话永久死锁。主循环、压缩自检、冒烟测试必须用同一份实现，
+ * 不能各写一套 —— 否则「自检通过了但主循环不认」是最难查的一类 bug。
+ */
+export function findOrphanToolUseIds(messages: Message[]): string[] {
+  const pending = new Set<string>()
+  const answered = new Set<string>()
+
+  for (const m of messages) {
+    if (m.type === 'assistant') {
+      for (const b of m.message.content) {
+        if (b.type === 'tool_use') pending.add(b.id)
+      }
+    } else if (m.type === 'user' && Array.isArray(m.message.content)) {
+      for (const b of m.message.content) {
+        if (b.type === 'tool_result') answered.add(b.tool_use_id)
+      }
+    }
+  }
+  for (const id of answered) pending.delete(id)
+  return [...pending]
+}
+
 /** 估算一条消息的 token 数（粗略：中文按 1 token/字、英文按 4 字符/token） */
 export function estimateTokens(msg: Message): number {
   const text =

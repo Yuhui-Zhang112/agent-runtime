@@ -22,6 +22,8 @@ import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 
 import { runAgent, type TurnTrace } from '../core/runAgent.js'
+import { TraceStore } from '../core/traceStore.js'
+import type { CompactionEvent } from '../core/compaction.js'
 import type { ToolRegistry } from '../core/tool.js'
 import type { PermissionEngine } from '../core/permissions.js'
 import type { ModelProvider } from '../api/types.js'
@@ -155,6 +157,15 @@ export class AgentServer {
     try {
       if (method === 'GET' && path === '/v1/tools') {
         return sendJson(res, 200, { tools: this.tools.specs() })
+      }
+
+      // ── Phase 3：当前压缩策略（运维/看板查询用，不暴露历史内容）──
+      if (method === 'GET' && path === '/v1/compaction') {
+        return sendJson(res, 200, {
+          enabled: this.cfg.compaction !== null,
+          policy: this.cfg.compaction,
+          traceDir: this.cfg.traceDir,
+        })
       }
 
       // ── Phase 2：权限状态、规则、审批 ──────────────────────
@@ -300,6 +311,8 @@ export class AgentServer {
     this.active += 1
     const runId = createUuid()
     const log = this.logger.child({ sessionId, runId })
+    // Phase 3：每轮 Trace 落盘，进程重启后仍可回放（Eval / 看板的数据源）
+    const traceStore = new TraceStore(this.cfg.traceDir, runId)
     const controller = new AbortController()
     // 客户端断开就中止 —— 否则模型还在跑、钱还在烧
     req.on('close', () => controller.abort())
@@ -334,6 +347,27 @@ export class AgentServer {
         system: this.cfg.system,
         tools: this.tools,
         permissions: this.permissions,
+        compaction: this.cfg.compaction,
+        onCompaction: (e: CompactionEvent) => {
+          sse('compaction', {
+            turn: e.turn,
+            applied: e.applied,
+            reason: e.reason,
+            beforeTokens: e.beforeTokens,
+            afterTokens: e.afterTokens,
+            savedTokens: e.savedTokens,
+            collapsedCount: e.collapsedCount,
+          })
+          if (e.applied) {
+            log.info('compaction', {
+              turn: e.turn,
+              beforeTokens: e.beforeTokens,
+              afterTokens: e.afterTokens,
+              savedTokens: e.savedTokens,
+              collapsedCount: e.collapsedCount,
+            })
+          }
+        },
         messages: session.messages,
         cwd: this.cfg.cwd,
         maxTurns: this.cfg.maxTurns,
@@ -342,6 +376,7 @@ export class AgentServer {
         tracer: {
           onTurn: (t: TurnTrace) => {
             spent += t.costUSD
+            traceStore.onTurn(t)
             sse('turn', {
               turn: t.turn,
               contextTokens: t.contextTokens,
@@ -350,6 +385,7 @@ export class AgentServer {
               maxConcurrency: t.maxConcurrency,
               retries: t.retries,
               deniedTools: t.deniedTools,
+              compactionSavedTokens: t.compactionSavedTokens,
               tools: t.toolUses.map((u) => u.name),
             })
             log.info('turn', { turn: t.turn, contextTokens: t.contextTokens, costUSD: t.costUSD })
@@ -382,6 +418,8 @@ export class AgentServer {
         turns: result.turns,
         costUSD: spent,
         overBudget,
+        compactionSavedTokens: traceStore.summary().compactionSavedTokens,
+        traceFile: traceStore.path,
         finalText: result.finalText,
         error: result.error?.message,
       })

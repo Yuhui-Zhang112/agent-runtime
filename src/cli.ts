@@ -1,12 +1,9 @@
 /**
- * Phase 2 入口：带权限系统的主循环 REPL
- *
- * 与 Phase 1 的区别：多了一个 BashTool（能执行任意命令），
- * 以及拦在它前面的权限系统。命令 / 文件修改默认要问人，
- * 只读工具直接放行；被拒绝也是一条正常的 tool_result，模型不会崩。
+ * 主循环 REPL（Phase 3：带上下文压缩）
  *
  * 命令：/exit 退出 · /stats 用量 · /clear 清空 · /tools 工具列表
  *      /permissions 看模式与规则 · /mode <模式> 切换 · /allow <工具> [模式] 加允许规则
+ *      /compact 看压缩状态 · /compact off|on 临时开关
  */
 
 import { createInterface } from 'node:readline'
@@ -23,6 +20,12 @@ import {
   formatRule,
   type PermissionMode,
 } from './core/permissions.js'
+import {
+  DEFAULT_COMPACTION_POLICY,
+  countPlaceholders,
+  totalTokens,
+  type CompactionPolicy,
+} from './core/compaction.js'
 import { ReadTool } from './tools/ReadTool.js'
 import { GlobTool } from './tools/GlobTool.js'
 import { GrepTool } from './tools/GrepTool.js'
@@ -42,6 +45,8 @@ const SYSTEM =
   'Edit requires oldString to be unique in the file. ' +
   'A permission denial is a real result: do NOT retry the same command, ' +
   'switch to read-only tools or explain to the user. ' +
+  'A [上下文压缩] placeholder means a large tool result was folded away; ' +
+  'if you need its exact content, call Read again with the path shown in the placeholder. ' +
   'Be concise and direct.'
 
 // ── 环境变量 ────────────────────────────────────────────────
@@ -118,7 +123,13 @@ async function main(): Promise<void> {
   )
 
   const messages: Message[] = []
-  const totals = { turns: 0, toolCalls: 0, input: 0, output: 0, cost: 0 }
+  const totals = { turns: 0, toolCalls: 0, input: 0, output: 0, cost: 0, saved: 0 }
+  // Phase 3：默认开启可恢复压缩。COMPACTION=off 可关掉做基线对照
+  let compaction: CompactionPolicy | null = ['off', 'false', '0'].includes(
+    (process.env.COMPACTION ?? 'on').trim().toLowerCase(),
+  )
+    ? null
+    : DEFAULT_COMPACTION_POLICY
 
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   const ask = (q: string) => new Promise<string>((r) => rl.question(q, r))
@@ -141,11 +152,18 @@ async function main(): Promise<void> {
     },
   })
 
-  console.log(C.dim(`\n  agent-runtime · Phase 2（权限系统 + Bash）`))
+  console.log(C.dim(`\n  agent-runtime · Phase 3（上下文压缩 + Eval）`))
   console.log(C.dim(`  provider=${provider.name}  model=${model}`))
   console.log(C.dim(`  工具：${tools.list().map((t) => t.name).join(', ')}`))
   console.log(C.dim(`  权限模式：${permissions.currentMode}（/permissions 查看规则，/mode 切换）`))
-  console.log(C.dim(`  /exit 退出 · /stats 用量 · /clear 清空 · /tools 工具列表\n`))
+  console.log(
+    C.dim(
+      compaction
+        ? `  上下文压缩：开（触发 ${compaction.triggerTokens} → 预算 ${compaction.targetTokens} tok，可恢复）`
+        : '  上下文压缩：关（基线模式）',
+    ),
+  )
+  console.log(C.dim(`  /exit 退出 · /stats 用量 · /compact 压缩状态 · /clear 清空 · /tools 工具列表\n`))
 
   while (true) {
     let input: string
@@ -190,6 +208,30 @@ async function main(): Promise<void> {
       continue
     }
 
+    if (input === '/compact' || input.startsWith('/compact ')) {
+      const arg = input.split(/\s+/)[1] ?? ''
+      if (arg === 'off' || arg === 'on') {
+        compaction = arg === 'on' ? DEFAULT_COMPACTION_POLICY : null
+        console.log(C.green(`  上下文压缩已${arg === 'on' ? '开启' : '关闭'}`))
+        continue
+      }
+      if (arg) {
+        console.log(C.yellow('  用法：/compact 或 /compact off|on'))
+        continue
+      }
+      console.log(
+        C.dim(
+          compaction
+            ? `  压缩：开 · 触发 ${compaction.triggerTokens} → 预算 ${compaction.targetTokens} tok · ` +
+                `保护末尾 ${compaction.protectRecentMessages} 条 · ${compaction.recoverable ? '可恢复' : '不可恢复'}`
+            : '  压缩：关（基线模式，/compact on 开启）',
+        ),
+      )
+      console.log(C.dim(`  当前历史 ${messages.length} 条 / 约 ${totalTokens(messages)} tok · 已折叠 ${countPlaceholders(messages)} 条`))
+      console.log(C.dim(`  本次会话累计因压缩省下 ${totals.saved} tok`))
+      continue
+    }
+
     if (input === '/tools') {
       for (const t of tools.list()) {
         console.log(
@@ -202,7 +244,8 @@ async function main(): Promise<void> {
       console.log(
         C.dim(
           `  累计：${totals.turns} 轮 · ${totals.toolCalls} 次工具调用 · ` +
-            `in ${totals.input} / out ${totals.output} · $${totals.cost.toFixed(4)}`,
+            `in ${totals.input} / out ${totals.output} · $${totals.cost.toFixed(4)} · ` +
+            `压缩省下 ${totals.saved} tok`,
         ),
       )
       continue
@@ -227,6 +270,17 @@ async function main(): Promise<void> {
         system: SYSTEM,
         tools,
         permissions,
+        compaction,
+        onCompaction: (e) => {
+          if (!e.applied) return
+          totals.saved += e.savedTokens
+          console.log(
+            C.dim(
+              `    ⇲ 第 ${e.turn} 轮上下文压缩：${e.beforeTokens} → ${e.afterTokens} tok ` +
+                `（省 ${e.savedTokens}，折叠 ${e.collapsedCount} 条大结果）`,
+            ),
+          )
+        },
         messages,
         signal: controller.signal,
         maxTurns: 25,

@@ -87,6 +87,13 @@ async function main(): Promise<void> {
     `  权限 ${cfg.permissionMode} · 预置规则 ${cfg.permissionRules.length} 条 · ` +
       `审批超时 ${cfg.approvalTimeoutMs}ms（超时按拒绝）`,
   )
+  console.log(
+    cfg.compaction
+      ? `  上下文压缩 已启用 · 触发 ${cfg.compaction.triggerTokens} tok → 预算 ${cfg.compaction.targetTokens} tok · ` +
+          `保护末尾 ${cfg.compaction.protectRecentMessages} 条 · ${cfg.compaction.recoverable ? '可恢复' : '不可恢复'}`
+      : '  上下文压缩 已关闭（基线模式）',
+  )
+  console.log(`  Trace 落盘 ${cfg.traceDir ?? '未开启（仅内存）'}`)
 
   // 定期回收空闲会话。unref() 让这个定时器不阻止进程退出
   const sweeper = setInterval(() => {

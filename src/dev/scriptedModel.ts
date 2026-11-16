@@ -77,8 +77,8 @@ export class ScriptedProvider implements ModelProvider {
 
 // ── 事件构造 ────────────────────────────────────────────────
 
-/** 把一"幕"剧本展开成标准流事件序列 */
-function buildEvents(turn: ScriptedTurn, chunkSize: number, _model: string): StreamEvent[] {
+/** 把一"幕"剧本展开成标准流事件序列。导出给评测模型复用，避免两套 SSE 构造逻辑 */
+export function buildEvents(turn: ScriptedTurn, chunkSize: number, _model: string): StreamEvent[] {
   const events: StreamEvent[] = []
 
   events.push({

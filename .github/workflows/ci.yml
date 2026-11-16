@@ -41,3 +41,12 @@ jobs:
 
       - name: 冒烟测试 · 权限系统（规则 / 审批 / Bash 安全，无需 API key）
         run: npm run smoke:permission
+
+      - name: 冒烟测试 · 上下文压缩（自检回滚 / 配对 / Trace 持久化 / 可复现）
+        run: npm run smoke:compaction
+
+      - name: 压缩策略 A/B 实验（20 任务 × 3 组 + 参数扫描，两次运行核对一致）
+        run: npm run eval:compaction
+
+      - name: 构建产物
+        run: npm run build

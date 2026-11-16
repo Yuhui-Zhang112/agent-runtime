@@ -14,7 +14,9 @@
     "smoke:retry": "tsx src/dev/smokeRetry.ts",
     "smoke:server": "tsx src/dev/smokeServer.ts",
     "smoke:permission": "tsx src/dev/smokePermission.ts",
-    "smoke:all": "npm run smoke && npm run smoke:tool && npm run smoke:agent && npm run smoke:exec && npm run smoke:retry && npm run smoke:server && npm run smoke:permission",
+    "smoke:compaction": "tsx src/dev/smokeCompaction.ts",
+    "eval:compaction": "tsx src/dev/evalCompaction.ts",
+    "smoke:all": "npm run smoke && npm run smoke:tool && npm run smoke:agent && npm run smoke:exec && npm run smoke:retry && npm run smoke:server && npm run smoke:permission && npm run smoke:compaction",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js"

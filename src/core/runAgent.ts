@@ -40,9 +40,17 @@ import type { ToolContext, ToolRegistry } from './tool.js'
 import type { PermissionEngine } from './permissions.js'
 import { ProviderError, type ModelProvider } from '../api/types.js'
 import {
+  compactMessages,
+  resolveCompactionPolicy,
+  toCompactionEvent,
+  type CompactionEvent,
+  type CompactionPolicy,
+} from './compaction.js'
+import {
   createUserMessage,
   estimateTokens,
   extractToolUses,
+  findOrphanToolUseIds,
   type AssistantMessage,
   type ContentBlock,
   type Message,
@@ -80,6 +88,10 @@ export interface TurnTrace {
   retries: number
   /** 本轮被权限系统拦下的工具数 —— 监控"模型有没有在试探边界" */
   deniedTools: number
+  /** 本轮因上下文压缩少发给模型的 token。换算成钱就是压缩的真实收益 */
+  compactionSavedTokens: number
+  /** 本轮的压缩判定（含「判定过但没触发」），看板据此画时间线 */
+  compactionEvents: CompactionEvent[]
 }
 
 export interface Tracer {
@@ -108,6 +120,13 @@ export interface RunAgentOptions {
   permissions?: PermissionEngine
   /** 工具开始/结束的实时事件，UI 用它显示进度 */
   onToolEvent?: (e: ToolEvent) => void
+  /**
+   * 上下文压缩策略（可选）。不传 / 传 null = 完全不压缩（A/B 实验的基线组）。
+   * 传入后每轮「问模型之前」做一次判定与结构化手术，压完自检不过就回滚。
+   */
+  compaction?: Partial<CompactionPolicy> | null
+  /** 每次压缩判定的实时事件（含未触发的原因），SSE 与看板用 */
+  onCompaction?: (e: CompactionEvent) => void
   /** 重试策略。不传就用 DEFAULT_RETRY_POLICY（3 次、500ms 起、8s 封顶） */
   retry?: Partial<RetryPolicy>
   /** 每次决定重试时回调，用于打印"网络抖动，第 N 次重试…" */
@@ -154,15 +173,36 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     maxParallel = DEFAULT_MAX_PARALLEL,
     permissions,
     onToolEvent,
+    compaction,
+    onCompaction,
     retry,
     onRetry,
   } = opts
 
   const traces: TurnTrace[] = []
   const ctx: ToolContext = { cwd, signal }
+  // 每轮的 trace 必须同时进结果数组和回调。Phase 1 只调了回调、忘了入数组，
+  // 导致 result.traces 永远是空的（服务层拿它记 turns，一直是 0）—— 这里修掉。
+  const emitTrace = (t: TurnTrace): void => {
+    traces.push(t)
+    tracer?.onTurn?.(t)
+  }
+  // 策略只解析一次：非法值在第一次调用就炸，不带着半懂的配置跑半程
+  const compactionPolicy = compaction ? resolveCompactionPolicy(compaction) : null
 
   for (let turn = 1; turn <= maxTurns; turn += 1) {
     if (signal?.aborted) return finish('aborted', turn - 1, messages, traces)
+
+    // ⓪ 发请求之前先量体裁衣：上下文过阈值就对大块 tool_result 做结构化手术。
+    //    压缩只改 tool_result 的文本，不删消息、不动 uuid 链，所以配对不断。
+    //    自检失败会整套回滚 —— 绝不把坏消息发给 API。
+    let compactionEvent: CompactionEvent | null = null
+    if (compactionPolicy) {
+      const r = compactMessages(messages, compactionPolicy)
+      if (r.applied) messages.splice(0, messages.length, ...r.messages)
+      compactionEvent = toCompactionEvent(turn, r, compactionPolicy.recoverable)
+      onCompaction?.(compactionEvent)
+    }
 
     // ① 问模型（流式）。最后一个快照是终态
     //
@@ -222,7 +262,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
     // ② 不再要工具 → 这一轮就是最终答案，循环结束
     if (toolUses.length === 0) {
-      tracer?.onTurn?.(makeTrace(turn, model, durationMs, assistant, messages, [], 0, usage, retries))
+      emitTrace(
+        makeTrace(turn, model, durationMs, assistant, messages, [], 0, usage, retries, compactionEvent),
+      )
       return finish('end_turn', turn, messages, traces)
     }
 
@@ -252,8 +294,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
     // ④ 把结果作为一条"用户消息"回传，继续下一轮
     messages.push(createUserMessage(resultBlocks, assistant.uuid))
-    tracer?.onTurn?.(
-      makeTrace(turn, model, durationMs, assistant, messages, executed, toolMs, usage, retries),
+    emitTrace(
+      makeTrace(turn, model, durationMs, assistant, messages, executed, toolMs, usage, retries, compactionEvent),
     )
 
     if (signal?.aborted) return finish('aborted', turn, messages, traces)
@@ -274,6 +316,7 @@ function makeTrace(
   toolMs: number,
   usage: AssistantMessage['message']['usage'],
   retries: number,
+  compactionEvent: CompactionEvent | null,
 ): TurnTrace {
   const toolResults = executed.map((e) => ({
     toolUseId: e.toolUseId,
@@ -303,6 +346,8 @@ function makeTrace(
     maxConcurrency: toolResults.length === 0 ? 0 : Math.max(...perWave.values()),
     retries,
     deniedTools: executed.filter((e) => e.denied === true).length,
+    compactionSavedTokens: compactionEvent?.applied ? compactionEvent.savedTokens : 0,
+    compactionEvents: compactionEvent ? [compactionEvent] : [],
   }
 }
 
@@ -333,21 +378,5 @@ function lastAssistantText(messages: Message[]): string {
  * 正常情况必须为空数组 —— 不为空说明会话已经处于死锁状态。
  */
 export function findOrphanToolUses(messages: Message[]): string[] {
-  const orphans = new Set<string>()
-  const answered = new Set<string>()
-
-  for (const m of messages) {
-    if (m.type === 'assistant') {
-      for (const b of m.message.content) {
-        if (b.type === 'tool_use') orphans.add(b.id)
-      }
-    }
-    if (m.type === 'user' && Array.isArray(m.message.content)) {
-      for (const b of m.message.content) {
-        if (b.type === 'tool_result') answered.add(b.tool_use_id)
-      }
-    }
-  }
-  for (const id of answered) orphans.delete(id)
-  return [...orphans]
+  return findOrphanToolUseIds(messages)
 }
