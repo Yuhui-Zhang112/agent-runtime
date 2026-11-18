@@ -6,7 +6,7 @@
 
 **它属于哪一层**：LLM 系统可分为模型层 / 运行时（框架）层 / 应用层 / 业务层。本项目实现的是**运行时层**——即 LangChain、LangGraph 本体所在的那一层，而不是用它们搭 RAG、写业务 Agent 的应用层。这里没有「接个 API + 做个界面」，只有主循环、消息树、工具执行、权限裁决与上下文管理。
 
-**当前进度：Phase 5 完成** —— 运行时内核之上补齐了**场景 Agent、统一 Eval 门禁、Trace 只读 API 与 TypeScript 看板**，项目成为真正的 TS 全栈。核心是一条可量化的主线：可恢复上下文压缩（Phase 3）→ 20 个微任务测「省不省钱」→ 12 个完整 issue 定位任务测「活还能不能干完、参数该怎么定」→ 两套实验合并成看板数据源，并由「不可复现就失败」的门禁守住。类型检查通过，**9 组冒烟测试共 292 项断言**全部通过（均无需 API key）；GitHub Actions 每次 push 复跑同一套验证、重跑实验并校验报告零 diff。
+**当前进度：Phase 5 完成** —— 运行时内核之上补齐了**场景 Agent、统一 Eval 门禁、Trace 只读 API 与 TypeScript 看板**，项目成为真正的 TS 全栈。核心是一条可量化的主线：可恢复上下文压缩（Phase 3）→ 20 个微任务测「省不省钱」→ 12 个完整 issue 定位任务测「活还能不能干完、参数该怎么定」→ 两套实验合并成看板数据源，并由「不可复现就失败」的门禁守住。类型检查通过，**9 组冒烟测试共 294 项断言**全部通过（均无需 API key）；GitHub Actions 每次 push 复跑同一套验证、重跑实验并校验报告零 diff。
 
 > 实验报告：[compaction A/B](reports/compaction-experiment.md) · [场景回归](reports/scenario-eval.md) · [看板数据源](reports/eval-summary.json)（随仓库提交，含完整数据、参数扫描与诚实边界）
 
@@ -16,7 +16,7 @@
 npm install
 cp .env.example .env      # 填入 API key（Anthropic 或任意 OpenAI 兼容接口）
 
-npm run smoke:all         # 零 API key 冒烟测试（9 组 292 项），验证内核没坏
+npm run smoke:all         # 零 API key 冒烟测试（9 组 294 项），验证内核没坏
 npm run eval:all          # 零 API key 跑两套实验 + 生成看板数据源，不可复现就失败
 npm run build:all         # 编译内核（dist/）+ TypeScript 看板（public/dashboard.js）
 npm run dev               # 终端对话 REPL
@@ -102,7 +102,7 @@ src/
 │   ├── evalCompaction.ts  A/B/C 对照 + 12 点参数扫描 + 报告生成
 │   ├── evalScenario.ts    ★ 场景回归：4 组对照 + 6 点门槛扫描 + 逐任务判分
 │   ├── evalAll.ts         ★ 统一门禁：校验可复现、合并两套报告、产出 eval-summary.json
-│   └── smoke*.ts          9 组冒烟测试（292 项断言，含服务 API 组与 Eval 门禁组）
+│   └── smoke*.ts          9 组冒烟测试（294 项断言，含服务 API 组与 Eval 门禁组）
 ├── web/dashboard.ts     ★ 看板前端（TS，无框架，手绘 SVG 折线/柱图）
 ├── public/              看板 HTML 壳 + 编译产物 dashboard.js（随仓库提交，零构建可用）
 └── reports/             实验报告（md + json，自动生成且逐字节可复现）
@@ -253,7 +253,9 @@ TRACE_DIR/*.jsonl → GET /v1/traces[/:runId] ───────────�
 - 压缩策略的 A/B 评测要动的是消息树和配对边界 —— 这层对框架使用者是黑盒，他们只能等框架给配置项。
 - 权限系统也一样：要拦的是「工具执行之前」那一瞬间，而用框架的人只看得到应用层回调。
 
-验证层同样是为这一层服务的：`scriptedModel.ts` 能稳定复现「网络腰斩半个 JSON」「中途中断」「审批挂起」这类真实 API 上碰运气都碰不到的场景；`evalModel.ts` 进一步让「压缩省了钱」和「压缩让引用丢失」变成同一把尺子上的两个数；`scenarios/issueAgent.ts` 则把同一把尺子搬到完整业务流程上。因此全部 292 项断言与整份实验报告**不需要任何密钥**，且结果可复现。
+验证层同样是为这一层服务的：`scriptedModel.ts` 能稳定复现「网络腰斩半个 JSON」「中途中断」「审批挂起」这类真实 API 上碰运气都碰不到的场景；`evalModel.ts` 进一步让「压缩省了钱」和「压缩让引用丢失」变成同一把尺子上的两个数；`scenarios/issueAgent.ts` 则把同一把尺子搬到完整业务流程上。因此全部 294 项断言与整份实验报告**不需要任何密钥**，且结果可复现。
+
+「可复现」还得跨机器成立：`walkFiles()` 对目录项强制字典序，`Glob` 的 mtime 排序额外用路径兜底。原因是 `readdirSync` 的顺序由文件系统实现决定（macOS APFS 常按创建序、Linux ext4/overlayfs 常按哈希序），不排序时 Grep 的命中顺序与 `maxMatches` 截断集合会随机器漂移，工具结果内容一变，token 和成本就跟着变。CI 用「重跑实验后 `reports/` 零 diff」把这条锁死，冒烟里也有专门的契约断言防回归。
 
 > 姿态说明：自研不是为了不用框架。自己写过这层之后，LangChain 就不再是黑盒 —— 出问题能定位到它内部哪一层。公司用框架，我读它的源码像读熟人写的；公司不用，我就是那层。
 
@@ -263,7 +265,7 @@ TRACE_DIR/*.jsonl → GET /v1/traces[/:runId] ───────────�
 |---|---|
 | `npm run dev` | 终端 REPL（`/compact` 查状态、`/compact off\|on` 开关） |
 | `npm run serve` | HTTP 服务（`/dashboard` 看板） |
-| `npm run smoke:all` | 全部冒烟测试（9 组 292 项，零 API key） |
+| `npm run smoke:all` | 全部冒烟测试（9 组 294 项，零 API key） |
 | `npm run eval:compaction` | 重跑压缩 A/B 实验（20 任务 × 3 组 + 12 点扫描） |
 | `npm run eval:scenario` | 重跑场景回归（12 个 issue × 4 组 + 6 点门槛扫描） |
 | `npm run eval:all` | 上面两套 + 统一门禁，产出 `reports/eval-summary.json`（**不可复现就失败**） |

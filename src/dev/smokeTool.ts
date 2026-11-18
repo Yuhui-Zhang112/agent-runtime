@@ -8,14 +8,15 @@
  *   npm run smoke:tool
  */
 
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { ReadTool } from '../tools/ReadTool.js'
 import { GlobTool } from '../tools/GlobTool.js'
 import { GrepTool } from '../tools/GrepTool.js'
 import { WriteTool } from '../tools/WriteTool.js'
 import { EditTool } from '../tools/EditTool.js'
+import { walkFiles } from '../tools/paths.js'
 import { ToolRegistry, defineTool, runTool, toToolSpec, type ToolContext } from '../core/tool.js'
 import { z } from 'zod'
 import type { ContentBlock } from '../types/message.js'
@@ -101,6 +102,19 @@ async function main(): Promise<void> {
 
   writeFileSync(join(tmp, 'dummy.txt'), 'x')
 
+  // 目录遍历必须字典序有序：readdirSync 的顺序取决于文件系统实现
+  // （macOS APFS 常按创建序、Linux ext4/overlayfs 常按哈希序）。不排序的话，
+  // Grep 的命中顺序与 maxMatches 截断集合都会漂移，离线评测报告无法跨机器复现。
+  // 这里故意按逆序创建文件，让「依赖创建序」的实现必然露馅。
+  const walkRoot = join(tmp, 'walk-order')
+  mkdirSync(join(walkRoot, 'b-dir'), { recursive: true })
+  mkdirSync(join(walkRoot, 'node_modules'), { recursive: true })
+  for (const name of ['z.ts', 'm.ts', 'a.ts']) writeFileSync(join(walkRoot, name), name)
+  writeFileSync(join(walkRoot, 'b-dir', 'nested.ts'), 'nested')
+  writeFileSync(join(walkRoot, 'node_modules', 'ignored.ts'), 'skip')
+  const walked = walkFiles(walkRoot).map((p) => relative(walkRoot, p).split(sep).join('/'))
+  const expectedWalk = ['a.ts', 'b-dir/nested.ts', 'm.ts', 'z.ts']
+
   const checks: Array<[string, boolean, string]> = [
     ['工具被注册', registry.has('Read'), registry.list().map((t) => t.name).join(',')],
     ['生成 JSON Schema', spec!.name === 'Read' && 'path' in props, Object.keys(props).join(',')],
@@ -124,6 +138,8 @@ async function main(): Promise<void> {
     ['Edit 多处匹配 → 拒绝', editAmbiguous.isError === true && editAmbiguous.output.includes('2 次'), '逼模型写精确'],
     ['Edit replaceAll 生效', !editAll.isError && !finalContent.includes('alpha'), '两处都替换'],
     ['路径越界被拦截', escape.isError === true && escape.output.includes('超出工作目录'), '不许跑出 cwd'],
+    ['目录遍历字典序有序（跨平台可复现）', JSON.stringify(walked) === JSON.stringify(expectedWalk), walked.join(' → ')],
+    ['目录遍历跳过依赖目录', !walked.includes('node_modules/ignored.ts'), 'node_modules 已排除'],
   ]
 
   console.log('\n  冒烟测试 —— 工具系统\n')

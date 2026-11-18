@@ -41,7 +41,13 @@ export function walkFiles(root: string, limit = 5000): string[] {
     if (out.length >= limit || depth > 20) return
     let entries
     try {
-      entries = readdirSync(dir, { withFileTypes: true })
+      // 必须排序：readdirSync 的顺序取决于文件系统实现（macOS APFS 常按创建序、
+      // Linux ext4/overlayfs 常按哈希序）。不排序的话，同一份仓库在不同机器上
+      // Grep 的命中顺序、maxMatches 截断集合都会不同，工具结果内容随之变化，
+      // 离线评测的 token/成本就再也无法跨机器复现。
+      entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+        a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+      )
     } catch {
       return // 无权限等，静默跳过
     }

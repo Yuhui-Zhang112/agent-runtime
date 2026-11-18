@@ -48,7 +48,9 @@ export const GlobTool = defineTool({
 
     const files = walkFiles(base)
       .filter((abs) => re.test(toPosix(relative(cwd, abs))))
-      .sort((a, b) => mtime(b) - mtime(a))
+      // mtime 相同时（CI 刚 checkout、或同一毫秒内批量创建）必须用路径兜底，
+      // 否则顺序会退回文件系统目录项顺序，离线评测的 token/成本无法跨机器复现。
+      .sort((a, b) => mtime(b) - mtime(a) || (a < b ? -1 : a > b ? 1 : 0))
       .slice(0, MAX_RESULTS)
       .map((abs) => toPosix(relative(cwd, abs)))
 
