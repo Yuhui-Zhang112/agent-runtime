@@ -121,6 +121,7 @@ async function main(): Promise<void> {
     ['参数必填被识别', JSON.stringify(spec!.input_schema).includes('required'), 'required 含 path'],
     ['正常读取文件成功', !good.isError && good.output.includes('package.json'), `${good.output.length} 字符`],
     ['输出带行号', /\n\s*1\t/.test(good.output), '第 1 行有行号前缀'],
+    ['Read 结果只回相对路径（跨平台可复现）', good.output.startsWith('package.json\n') && !good.output.includes(ctx.cwd), `首行 ${good.output.split('\n')[0]}`],
     ['tool_result 与 tool_use 配对', resultBlock.type === 'tool_result' && resultBlock.tool_use_id === 'tu_1', resultBlock.type === 'tool_result' ? resultBlock.tool_use_id : '(错)'],
     ['文件不存在 → isError', missing.isError === true, missing.output.slice(0, 24)],
     ['缺必填参数 → isError', badArgs.isError === true && badArgs.output.includes('不合法'), '被 zod 拦下'],

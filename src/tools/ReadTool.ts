@@ -9,9 +9,21 @@
  */
 
 import { readFileSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { defineTool, type ToolContext } from '../core/tool.js'
+
+/**
+ * 工具结果里只回相对路径，不回绝对路径。三个理由：
+ *  1. 绝对路径把本机目录结构泄漏进模型上下文，也没法跨机器复用对话；
+ *  2. 每轮都要重发全部历史，多出来的几十个字符会被轮数放大成真金白银；
+ *  3. 离线评测若把绝对路径算进 token，结果会随 OS 临时目录长度漂移
+ *     （macOS `/var/folders/.../T/` vs Linux `/tmp`），报告就无法跨平台复现。
+ */
+function displayPath(cwd: string, abs: string): string {
+  const rel = relative(cwd, abs).split(sep).join('/')
+  return rel === '' ? '.' : rel
+}
 
 /** 单次读取上限，防止一个巨型文件把上下文撑爆（上下文工程的第一道防线） */
 const MAX_BYTES = 100_000
@@ -41,7 +53,7 @@ export const ReadTool = defineTool({
     try {
       size = statSync(abs).size
     } catch {
-      return { output: `文件不存在或无法访问：${abs}`, isError: true }
+      return { output: `文件不存在或无法访问：${displayPath(ctx.cwd, abs)}`, isError: true }
     }
 
     const raw = readFileSync(abs, 'utf8')
@@ -59,7 +71,7 @@ export const ReadTool = defineTool({
     const truncated = raw.length > MAX_BYTES
     return {
       output:
-        `${abs}${truncated ? `\n[注意：文件 ${(size / 1024).toFixed(1)}KB，已截断到 100KB]` : ''}\n` +
+        `${displayPath(ctx.cwd, abs)}${truncated ? `\n[注意：文件 ${(size / 1024).toFixed(1)}KB，已截断到 100KB]` : ''}\n` +
         numbered,
     }
   },
