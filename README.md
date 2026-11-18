@@ -6,9 +6,9 @@
 
 **它属于哪一层**：LLM 系统可分为模型层 / 运行时（框架）层 / 应用层 / 业务层。本项目实现的是**运行时层**——即 LangChain、LangGraph 本体所在的那一层，而不是用它们搭 RAG、写业务 Agent 的应用层。这里没有「接个 API + 做个界面」，只有主循环、消息树、工具执行、权限裁决与上下文管理。
 
-**当前进度：Phase 3 完成** —— 在权限系统之上补齐了**可恢复上下文压缩**与**离线 A/B 评测**：大块工具结果被换成带原路径的占位符，压完五项自检失败即整套回滚；用 20 个确定性回归任务 + 12 个参数点量化出「成本降多少、代价是什么」。类型检查通过，**8 组冒烟测试共 270 项断言**全部通过（均无需 API key）；GitHub Actions 在每次 push 时复跑同一套验证并生成实验报告。
+**当前进度：Phase 5 完成** —— 运行时内核之上补齐了**场景 Agent、统一 Eval 门禁、Trace 只读 API 与 TypeScript 看板**，项目成为真正的 TS 全栈。核心是一条可量化的主线：可恢复上下文压缩（Phase 3）→ 20 个微任务测「省不省钱」→ 12 个完整 issue 定位任务测「活还能不能干完、参数该怎么定」→ 两套实验合并成看板数据源，并由「不可复现就失败」的门禁守住。类型检查通过，**9 组冒烟测试共 292 项断言**全部通过（均无需 API key）；GitHub Actions 每次 push 复跑同一套验证、重跑实验并校验报告零 diff。
 
-> 实验报告：[reports/compaction-experiment.md](reports/compaction-experiment.md)（随仓库提交，含完整数据、参数扫描曲线与诚实边界）
+> 实验报告：[compaction A/B](reports/compaction-experiment.md) · [场景回归](reports/scenario-eval.md) · [看板数据源](reports/eval-summary.json)（随仓库提交，含完整数据、参数扫描与诚实边界）
 
 ## 快速开始
 
@@ -16,13 +16,14 @@
 npm install
 cp .env.example .env      # 填入 API key（Anthropic 或任意 OpenAI 兼容接口）
 
-npm run smoke:all         # 零 API key 冒烟测试（270 项），验证内核没坏
-npm run eval:compaction   # 零 API key 压缩 A/B 实验，重跑报告
+npm run smoke:all         # 零 API key 冒烟测试（9 组 292 项），验证内核没坏
+npm run eval:all          # 零 API key 跑两套实验 + 生成看板数据源，不可复现就失败
+npm run build:all         # 编译内核（dist/）+ TypeScript 看板（public/dashboard.js）
 npm run dev               # 终端对话 REPL
-npm run serve             # 以 HTTP 服务方式运行
+npm run serve             # 以 HTTP 服务方式运行，然后打开 /dashboard
 ```
 
-`npm run smoke:all` 和 `npm run eval:compaction` 都不需要 API key —— 它们用确定性模型冒充真实厂商。**没有 key 也能验证内核是活的、实验是可复现的**。
+`smoke:all` / `eval:all` 都不需要 API key —— 它们用确定性模型冒充真实厂商。**没有 key 也能验证内核是活的、实验是可复现的、看板是有数据的**。
 
 ## 两种运行形态
 
@@ -47,9 +48,21 @@ curl -N -X POST http://127.0.0.1:8787/v1/sessions/<id>/runs \
 
 # 查当前压缩策略
 curl http://127.0.0.1:8787/v1/compaction -H 'Authorization: Bearer my-secret'
+
+# 看板：浏览器打开 http://127.0.0.1:8787/dashboard
+# 若服务设了 AUTH_TOKEN，在右上角填一次即可（数据接口全部走同一道鉴权）
 ```
 
 > 未设 `AUTH_TOKEN` 时服务只监听 localhost —— 想对外暴露必须显式配密钥。
+> 看板页面本身是空壳、不含数据，因此无需鉴权；所有数据都由下表这些**只读**接口提供。
+
+| 接口 | 返回 | 数据源 |
+|---|---|---|
+| `GET /dashboard` | 看板 HTML + `app.js` | `public/`（静态白名单，防路径穿越） |
+| `GET /v1/traces` | run 列表、汇总、压缩时间线 | `TRACE_DIR` 下的 JSONL |
+| `GET /v1/traces/:runId` | 某次 run 的逐轮 token / 成本 / 工具 / 压缩事件 | 同上，重启后仍可回放 |
+| `GET /v1/eval` | 两套实验的合并结论 | `reports/eval-summary.json` |
+| `GET /v1/scenarios` | 场景元数据与样例任务 | 代码内的 fixture 定义 |
 
 ### Docker
 
@@ -78,16 +91,21 @@ src/
 │   ├── toolExecution.ts 并发调度 + 执行前统一权限预检
 │   └── withRetry.ts     指数退避重试
 ├── tools/               Read / Glob / Grep / Write / Edit / Bash + 路径安全
-├── server/              配置 / 会话 / 日志 / HTTP+SSE / 审批队列
+├── server/              配置 / 会话 / 日志 / HTTP+SSE / 审批队列（含 4 个只读 API + 看板托管）
+├── scenarios/           ★ 合成仓库 + 12 个带 ground truth 的 issue + 确定性模型 + zod 判分
 ├── server.ts            服务入口
 ├── cli.ts               CLI 入口
 ├── dev/
 │   ├── scriptedModel.ts   剧本模型（冒充厂商，零 key 冒烟）
 │   ├── evalModel.ts       评测模型（会读历史，按真实上下文计 token）
-│   ├── evalTasks.ts       固定种子回归任务集
-│   ├── evalCompaction.ts  A/B/C 对照 + 参数扫描 + 报告生成
-│   └── smoke*.ts          8 组冒烟测试（270 项断言）
-└── reports/             实验报告（md + json，自动生成）
+│   ├── evalTasks.ts       固定种子回归任务集（20 个埋值-引用微任务）
+│   ├── evalCompaction.ts  A/B/C 对照 + 12 点参数扫描 + 报告生成
+│   ├── evalScenario.ts    ★ 场景回归：4 组对照 + 6 点门槛扫描 + 逐任务判分
+│   ├── evalAll.ts         ★ 统一门禁：校验可复现、合并两套报告、产出 eval-summary.json
+│   └── smoke*.ts          9 组冒烟测试（292 项断言，含服务 API 组与 Eval 门禁组）
+├── web/dashboard.ts     ★ 看板前端（TS，无框架，手绘 SVG 折线/柱图）
+├── public/              看板 HTML 壳 + 编译产物 dashboard.js（随仓库提交，零构建可用）
+└── reports/             实验报告（md + json，自动生成且逐字节可复现）
 ```
 
 ## 关键设计
@@ -190,6 +208,43 @@ APPROVAL_TIMEOUT_MS=60000     # 超时按拒绝，绝不无限挂住一轮
 
 > **诚实边界（面试请主动讲）**：这不是真 LLM，测的是「信息在上下文里是否可达」这一条**架构机制**，不模拟注意力衰减、幻觉或指令遵循能力；token 是估算而非厂商计数。数字应表述为**架构层的可达性/成本指标**，不是真实业务任务成功率。主动讲清这一点，比被追问出来强得多。
 
+## 场景 Agent 回归（Phase 4）★
+
+Phase 3 的 20 个「埋值—引用」微任务回答的是**引用可达性**；但架构实验里省了钱，不代表业务流程还能干完。于是造了一个 L2 示范应用：**开源项目 issue 定位 Agent**。
+
+固定种子生成 12 个 issue，每个都带 3 份大体积噪音文件撑大上下文；流程是 `Grep(keyword)` 定位候选 → `Read(rootFile)` 取精确证据标记 → 输出 JSON 结论（zod 校验）。ground truth 在造 fixture 时就已知，所以「根因文件 + 缺陷类型 + 精确证据标记三项全中」可以**自动判分**，模型拿不到证据只能输出 `category="unknown"`，不会编造。
+
+| 策略 | 成功 | 证据丢失率 | 累计成本 | 额外重读 |
+|---|---:|---:|---:|---:|
+| **A 基线（不压缩）** | 12/12 | 0% | $0.6692 | 0 |
+| **B 压缩·不可恢复** | **0/12** | **100%** | $0.5818 | 0 |
+| **C 照搬 Phase 3 默认参数** | 12/12 | 0% | **$0.7107（+6.2%）** | 12 |
+| **D 只折大结果（推荐）** | 12/12 | 0% | **$0.6120（−8.5%）** | 0 |
+
+> 完整数据、6 点门槛扫描、逐任务判分与简历句式见 [reports/scenario-eval.md](reports/scenario-eval.md)。
+
+**两个结论叠起来才完整**：① B vs C 证明**可恢复性决定会不会做错**；② C vs D 证明**折叠粒度决定会不会白省钱**。C 组把根因文件一起折了，逼出 12 次「回头重读 + 再重发一遍全历史」，省下的 token 全被吃光还倒赔 —— 只改 `minResultChars` 一个变量，门槛从 600 调到 2,400 字符，成本就从 **+6.2% 翻到 −8.5%**，而 8,000 以上则什么都不折、退化成基线。
+
+这说明「压缩降本 X%」从来不是固定数字，它取决于任务里早期证据被重新引用的概率。**换任务集必须重跑这张表**，这正是把压缩放在消息树那一层才做得到的管控。
+
+## 统一 Eval 门禁与 Trace 看板（Phase 5）★
+
+两套实验各有各的报告，散着放着迟早会变成「手改过的数字」。Phase 5 把它们收进一条链：
+
+```
+eval:compaction ┐
+                ├→ evalAll.ts（可复现校验 + 口径对齐）→ reports/eval-summary.json
+eval:scenario  ┘                                          ↓
+                                       GET /v1/eval → TypeScript 看板
+TRACE_DIR/*.jsonl → GET /v1/traces[/:runId] ──────────────┘
+```
+
+- **门禁不是装饰**：`evalAll.ts` 任一报告的 `reproducible !== true` 就直接 `exit 1`；`smoke:eval` 再校验汇总确定性、结论方向、诚实边界未删、已提交产物与当前报告一致。
+- **产物即源码**：`eval-summary.json` 故意不写时间戳，CI 重跑实验后用 `git diff --exit-code -- reports/` 断言零 diff；`public/dashboard.js` 也从 TS 重新编译并比对，禁止手改或提交陈旧产物。
+- **看板无框架**：`web/dashboard.ts` 原生 DOM + 手绘 SVG（逐轮上下文折线、A/B 成本柱状、门槛敏感性、run 列表），无前端依赖 —— 和「自研薄层」的定位保持一致。页面只读三个接口，不含任何数据；服务设了 token 就在右上角填一次。
+
+> **诚实边界（面试必须主动讲）**：驱动这两套实验的都是**确定性假模型，不是真实 LLM**；仓库是结构真实、内容合成的 fixture（真实目录、真实 Grep/Read、真实结果体积），不是从 GitHub 抓的真实 issue。因此「成功率」是**架构层证据可达率**，不能对外说成真实业务解决率。可迁移的是「固定任务集 + A/B 对照 + 自动判分 + 可复现验证」这套评测方法本身。
+
 ## 为什么自研这一层（而不是直接调 LangChain）
 
 不是为了「不用框架」，而是因为**有些问题只有站在这一层才碰得到**：
@@ -198,7 +253,7 @@ APPROVAL_TIMEOUT_MS=60000     # 超时按拒绝，绝不无限挂住一轮
 - 压缩策略的 A/B 评测要动的是消息树和配对边界 —— 这层对框架使用者是黑盒，他们只能等框架给配置项。
 - 权限系统也一样：要拦的是「工具执行之前」那一瞬间，而用框架的人只看得到应用层回调。
 
-验证层同样是为这一层服务的：`scriptedModel.ts` 能稳定复现「网络腰斩半个 JSON」「中途中断」「审批挂起」这类真实 API 上碰运气都碰不到的场景；`evalModel.ts` 进一步让「压缩省了钱」和「压缩让引用丢失」变成同一把尺子上的两个数。因此全部 270 项断言与整份实验报告**不需要任何密钥**，且结果可复现。
+验证层同样是为这一层服务的：`scriptedModel.ts` 能稳定复现「网络腰斩半个 JSON」「中途中断」「审批挂起」这类真实 API 上碰运气都碰不到的场景；`evalModel.ts` 进一步让「压缩省了钱」和「压缩让引用丢失」变成同一把尺子上的两个数；`scenarios/issueAgent.ts` 则把同一把尺子搬到完整业务流程上。因此全部 292 项断言与整份实验报告**不需要任何密钥**，且结果可复现。
 
 > 姿态说明：自研不是为了不用框架。自己写过这层之后，LangChain 就不再是黑盒 —— 出问题能定位到它内部哪一层。公司用框架，我读它的源码像读熟人写的；公司不用，我就是那层。
 
@@ -207,16 +262,19 @@ APPROVAL_TIMEOUT_MS=60000     # 超时按拒绝，绝不无限挂住一轮
 | 命令 | 作用 |
 |---|---|
 | `npm run dev` | 终端 REPL（`/compact` 查状态、`/compact off\|on` 开关） |
-| `npm run serve` | HTTP 服务 |
-| `npm run smoke:all` | 全部冒烟测试（270 项，零 API key） |
-| `npm run eval:compaction` | 重跑 A/B 实验并生成 `reports/` 报告（零 API key） |
+| `npm run serve` | HTTP 服务（`/dashboard` 看板） |
+| `npm run smoke:all` | 全部冒烟测试（9 组 292 项，零 API key） |
+| `npm run eval:compaction` | 重跑压缩 A/B 实验（20 任务 × 3 组 + 12 点扫描） |
+| `npm run eval:scenario` | 重跑场景回归（12 个 issue × 4 组 + 6 点门槛扫描） |
+| `npm run eval:all` | 上面两套 + 统一门禁，产出 `reports/eval-summary.json`（**不可复现就失败**） |
+| `npm run smoke:eval` | 毫秒级校验评测产物一致性、结论方向与诚实边界 |
 | `npm run smoke` / `smoke:tool` / `smoke:agent` / `smoke:exec` / `smoke:retry` / `smoke:server` / `smoke:permission` / `smoke:compaction` | 分模块跑 |
 | `npm run typecheck` | 类型检查 |
-| `npm run build` | 编译到 `dist/` |
+| `npm run build` / `build:web` / `build:all` | 编译内核到 `dist/` / 看板到 `public/` / 两者 |
 | `npm start` | 运行编译产物 |
 
 ## 下一步
 
-- **场景 Agent**（L2 示范应用）—— 在这套 runtime 上跑一个开源项目 issue 分析 agent，回答「这东西到底能干什么」，并为压缩实验提供真实任务
-- **Trace 可视化看板**（Phase 5）—— 一个前端页面画每轮 token / 成本 / 压缩事件时间线，把「可观测性」从埋点补成可视化，项目也真正成为 TS 全栈
-- **Phase 4 · 多智能体** —— 时间紧可砍
+- **真实 LLM 小样本对照** —— 拿一小批真 issue 用真模型跑同一套 A/B，验证「架构层可达率」与真实解决率的相关性；这是把实验结论从机制证据推向业务证据的唯一办法。
+- **token 级 SSE** —— 目前是轮次级流式。要拿到逐 token 增量，得把 `callModel` 的流事件透到服务层，是一次独立改造。
+- **多智能体**（Subagent / Task / Team）—— 时间紧可砍，现有主循环已能承载多实例并发。

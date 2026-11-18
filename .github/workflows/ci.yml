@@ -45,8 +45,17 @@ jobs:
       - name: 冒烟测试 · 上下文压缩（自检回滚 / 配对 / Trace 持久化 / 可复现）
         run: npm run smoke:compaction
 
-      - name: 压缩策略 A/B 实验（20 任务 × 3 组 + 参数扫描，两次运行核对一致）
-        run: npm run eval:compaction
+      - name: 冒烟测试 · Eval 门禁（产物一致性 / 结论方向 / 诚实边界）
+        run: npm run smoke:eval
 
-      - name: 构建产物
-        run: npm run build
+      - name: 评测套件（压缩 A/B + 12 个 issue 场景回归 + 汇总门禁）
+        run: npm run eval:all
+
+      - name: 评测产物可复现（重跑后 reports/ 不得有 diff）
+        run: git diff --exit-code -- reports/
+
+      - name: 构建产物（内核 + TypeScript 看板）
+        run: npm run build:all
+
+      - name: 看板产物与 TS 源码一致（禁止手写/陈旧的 dashboard.js）
+        run: git diff --exit-code -- public/dashboard.js

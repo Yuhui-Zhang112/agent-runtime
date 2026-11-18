@@ -15,10 +15,15 @@
     "smoke:server": "tsx src/dev/smokeServer.ts",
     "smoke:permission": "tsx src/dev/smokePermission.ts",
     "smoke:compaction": "tsx src/dev/smokeCompaction.ts",
+    "smoke:eval": "tsx src/dev/smokeEval.ts",
     "eval:compaction": "tsx src/dev/evalCompaction.ts",
-    "smoke:all": "npm run smoke && npm run smoke:tool && npm run smoke:agent && npm run smoke:exec && npm run smoke:retry && npm run smoke:server && npm run smoke:permission && npm run smoke:compaction",
+    "eval:scenario": "tsx src/dev/evalScenario.ts",
+    "eval:all": "npm run eval:compaction && npm run eval:scenario && tsx src/dev/evalAll.ts",
+    "smoke:all": "npm run smoke && npm run smoke:tool && npm run smoke:agent && npm run smoke:exec && npm run smoke:retry && npm run smoke:server && npm run smoke:permission && npm run smoke:compaction && npm run smoke:eval",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
+    "build:web": "tsc -p tsconfig.web.json",
+    "build:all": "npm run build && npm run build:web",
     "start": "node dist/server.js"
   },
   "dependencies": {

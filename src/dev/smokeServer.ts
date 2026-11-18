@@ -225,6 +225,54 @@ async function main(): Promise<void> {
   checks.push(['I 结构化日志已落盘', files.length > 0 && lines.length > 10, `${files.length} 个文件 / ${lines.length} 行`])
   checks.push(['I 日志字段完整（ts/event/level）', parsed.every((r) => r.ts && r.event && r.level), parsed[0]?.event ?? ''])
 
+  // ── J 看板静态资源与只读 API（Phase 5）─────────────────────
+  // 页面是空壳（不含数据），所以静态资源不鉴权；所有数据接口仍走同一道鉴权。
+  // 同时验证：Trace 真落盘 → /v1/traces 能列出 → 逐轮明细能按 runId 读回。
+  const TRACE_DIR = mkdtempSync(join(tmpdir(), 'agent-runtime-trace-'))
+  const j = makeServer(
+    [
+      { blocks: [{ type: 'tool_use', name: 'Read', input: { path: 'package.json' } }] },
+      { blocks: [{ type: 'text', text: '读完了' }] },
+    ],
+    { AUTH_TOKEN: 'dash-token', TRACE_DIR },
+  )
+  const jInfo = await j.server.listen(0)
+  const jbase = `http://127.0.0.1:${jInfo.port}`
+  const jHeaders = { token: 'dash-token' }
+
+  const html = await call(jbase, '/dashboard')
+  const bundle = await call(jbase, '/dashboard/app.js')
+  // 带合法 token 试穿越：URL 里的 .. 会被 WHATWG URL 规范化掉，%2f 则不会被解码。
+  // 两种写法都必须落到白名单之外（404），绝不返回磁盘文件。
+  const traversal = await call(jbase, '/dashboard/%2e%2e/package.json', jHeaders)
+  const encoded = await call(jbase, '/dashboard/%2e%2e%2fpackage.json', jHeaders)
+  const leaked = [traversal.raw, encoded.raw].some((r) => r.includes('"dependencies"'))
+  const apiNoAuth = await call(jbase, '/v1/traces')
+
+  checks.push(['J 看板页面无需鉴权', html.status === 200 && html.raw.includes('Trace / Eval 看板'), `HTTP ${html.status}`])
+  checks.push(['J 前端脚本已构建', bundle.status === 200 && bundle.raw.includes('agent-runtime-token'), `HTTP ${bundle.status} / ${bundle.raw.length} 字节`])
+  checks.push(['J 静态路径白名单防穿越', traversal.status === 404 && encoded.status === 404 && !leaked, `${traversal.status} / ${encoded.status} · 无文件泄露`])
+  checks.push(['J 只读 API 仍受鉴权保护', apiNoAuth.status === 401, `HTTP ${apiNoAuth.status}`])
+
+  const jSess = await call(jbase, '/v1/sessions', { method: 'POST', ...jHeaders })
+  const jRun = await call(jbase, `/v1/sessions/${jSess.json.id}/runs`, {
+    method: 'POST',
+    body: JSON.stringify({ text: '读一下 package.json' }),
+    ...jHeaders,
+  })
+  const jDone = parseSSE(jRun.raw).find((e) => e.event === 'done')?.data
+  const traces = await call(jbase, '/v1/traces', jHeaders)
+  const detail = await call(jbase, `/v1/traces/${jDone?.runId ?? 'missing'}`, jHeaders)
+  const evalApi = await call(jbase, '/v1/eval', jHeaders)
+  const scenarios = await call(jbase, '/v1/scenarios', jHeaders)
+
+  checks.push(['J Trace 经 HTTP 落盘并可列出', traces.status === 200 && traces.json?.runs?.length === 1, `${traces.json?.runs?.length ?? 0} 次 run`])
+  checks.push(['J 汇总与压缩时间线字段齐备', traces.json?.summary?.turns >= 2 && Array.isArray(traces.json?.timeline), `${traces.json?.summary?.turns ?? 0} 轮`])
+  checks.push(['J 按 runId 读回逐轮明细', detail.status === 200 && detail.json?.turns?.length >= 2 && detail.json?.turns?.[0]?.tools?.includes('Read'), `${detail.json?.turns?.length ?? 0} 轮`])
+  checks.push(['J 评测接口返回汇总或明确缺失', evalApi.status === 200 && (evalApi.json?.available === false || evalApi.json?.suites?.length === 2), evalApi.json?.available === false ? 'available:false' : `${evalApi.json?.suites?.length ?? 0} 个套件`])
+  checks.push(['J 场景元数据接口可用', scenarios.status === 200 && scenarios.json?.scenarios?.[0]?.taskCount === 12 && scenarios.json?.scenarios?.[0]?.sample?.length === 3, `${scenarios.json?.scenarios?.[0]?.taskCount ?? 0} 个任务`])
+  await j.server.close()
+
   // ── 汇总 ───────────────────────────────────────────────
   console.log('\n服务层冒烟测试（零 API key，含真实 HTTP 与 SSE）\n')
   let pass = 0

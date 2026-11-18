@@ -20,9 +20,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 
 import { runAgent, type TurnTrace } from '../core/runAgent.js'
-import { TraceStore } from '../core/traceStore.js'
+import {
+  TraceStore,
+  readTraceDir,
+  readTraceFile,
+  summarizeTraces,
+  compactionTimeline,
+} from '../core/traceStore.js'
 import type { CompactionEvent } from '../core/compaction.js'
 import type { ToolRegistry } from '../core/tool.js'
 import type { PermissionEngine } from '../core/permissions.js'
@@ -31,7 +39,22 @@ import { createUserMessage, createUuid } from '../types/message.js'
 import { SessionStore, summarize } from './session.js'
 import { JsonlLogger, clip } from './log.js'
 import { ApprovalQueue } from './approvals.js'
+import { buildIssues, CATEGORIES, ISSUE_COUNT } from '../scenarios/issueFixtures.js'
 import type { ServerConfig } from './config.js'
+
+/**
+ * 项目根：tsx 跑 src/server/http.ts 与 node 跑 dist/server/http.js 时，
+ * dirname 都是 "<root>/(src|dist)/server"，所以两层 .. 都回到仓库根。
+ */
+const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
+const REPORTS_DIR = join(PROJECT_ROOT, 'reports')
+const PUBLIC_DIR = join(PROJECT_ROOT, 'public')
+
+/** 静态文件白名单：绝不把 URL 里的路径直接拼进文件系统 */
+const STATIC_FILES: Record<string, { file: string; type: string }> = {
+  '/dashboard': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
+  '/dashboard/app.js': { file: 'dashboard.js', type: 'text/javascript; charset=utf-8' },
+}
 
 export interface ServerDeps {
   config: ServerConfig
@@ -147,6 +170,24 @@ export class AgentServer {
       })
     }
 
+    // 看板静态资源：只是空壳页面，不含任何数据，因此不需要鉴权；
+    // 数据全部由下面那些需要鉴权的 /v1/* 接口提供。
+    const staticFile = method === 'GET' ? STATIC_FILES[path] : undefined
+    if (staticFile) {
+      try {
+        const body = readFileSync(join(PUBLIC_DIR, staticFile.file))
+        res.writeHead(200, {
+          'Content-Type': staticFile.type,
+          'Content-Length': body.length,
+          'Cache-Control': 'no-cache',
+        })
+        res.end(body)
+        return
+      } catch {
+        return sendJson(res, 503, { error: '看板未构建，请先运行 npm run build:web' })
+      }
+    }
+
     if (!this.authorized(req)) {
       return sendJson(res, 401, { error: '缺少或错误的 Authorization 头' })
     }
@@ -165,6 +206,98 @@ export class AgentServer {
           enabled: this.cfg.compaction !== null,
           policy: this.cfg.compaction,
           traceDir: this.cfg.traceDir,
+        })
+      }
+
+      // ── Phase 5：可观测性 / 评测 / 场景数据（全部只读）────────
+      if (method === 'GET' && path === '/v1/traces') {
+        const records = this.cfg.traceDir ? readTraceDir(this.cfg.traceDir) : []
+        const traces = records.map((r) => r.trace)
+        const runs = new Map<
+          string,
+          { runId: string; turns: number; costUSD: number; compactions: number; lastTs: string }
+        >()
+        for (const rec of records) {
+          const cur = runs.get(rec.runId) ?? {
+            runId: rec.runId,
+            turns: 0,
+            costUSD: 0,
+            compactions: 0,
+            lastTs: rec.ts,
+          }
+          cur.turns += 1
+          cur.costUSD += rec.trace.costUSD
+          cur.compactions += rec.trace.compactionEvents.filter((e) => e.applied).length
+          cur.lastTs = rec.ts
+          runs.set(rec.runId, cur)
+        }
+        return sendJson(res, 200, {
+          traceDir: this.cfg.traceDir,
+          runs: [...runs.values()].sort((a, b) => b.lastTs.localeCompare(a.lastTs)),
+          summary: summarizeTraces(traces),
+          timeline: compactionTimeline(traces),
+        })
+      }
+
+      const tr = /^\/v1\/traces\/([A-Za-z0-9_-]+)$/.exec(path)
+      if (tr && method === 'GET') {
+        const runId = tr[1]!
+        const records = this.cfg.traceDir
+          ? readTraceFile(join(this.cfg.traceDir, `traces-${runId}.jsonl`))
+          : []
+        const traces = records.map((r) => r.trace)
+        return sendJson(res, 200, {
+          runId,
+          records,
+          turns: traces.map((t) => ({
+            turn: t.turn,
+            inputTokens: t.inputTokens,
+            outputTokens: t.outputTokens,
+            contextTokens: t.contextTokens,
+            compactionSavedTokens: t.compactionSavedTokens,
+            costUSD: t.costUSD,
+            durationMs: t.durationMs,
+            toolMs: t.toolMs,
+            maxConcurrency: t.maxConcurrency,
+            retries: t.retries,
+            deniedTools: t.deniedTools,
+            tools: t.toolUses.map((u) => u.name),
+            compactionEvents: t.compactionEvents,
+          })),
+          summary: summarizeTraces(traces),
+        })
+      }
+
+      if (method === 'GET' && path === '/v1/eval') {
+        try {
+          const raw = readFileSync(join(REPORTS_DIR, 'eval-summary.json'), 'utf8')
+          return sendJson(res, 200, JSON.parse(raw))
+        } catch {
+          return sendJson(res, 200, {
+            available: false,
+            hint: '运行 npm run eval:all 生成评测报告',
+          })
+        }
+      }
+
+      if (method === 'GET' && path === '/v1/scenarios') {
+        return sendJson(res, 200, {
+          scenarios: [
+            {
+              key: 'issue-triage',
+              name: '开源 issue 定位',
+              workflow: 'Grep(keyword) → Read(rootFile) → 结构化结论（zod 校验）',
+              taskCount: ISSUE_COUNT,
+              categories: CATEGORIES,
+              sample: buildIssues(3).map((t) => ({
+                id: t.id,
+                keyword: t.keyword,
+                rootFile: t.rootFile,
+                category: t.category,
+              })),
+              evalCommand: 'npm run eval:scenario',
+            },
+          ],
         })
       }
 

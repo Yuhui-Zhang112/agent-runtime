@@ -23,7 +23,7 @@ import {
   buildEvents,
   type ScriptedBlock,
   type ScriptedTurn,
-} from './scriptedModel.js'
+} from '../core/streamEvents.js'
 import type { ModelProvider, ModelRequest, StreamEvent } from '../api/types.js'
 import { estimateTokens, type Message } from '../types/message.js'
 import { PLACEHOLDER_PREFIX } from '../core/compaction.js'

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-runtime · Trace 看板</title>
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --ink: #1d2733;
+    --muted: #66748a;
+    --line: #e2e8f0;
+    --accent: #2563eb;
+    --good: #0f9d6e;
+    --warn: #d97706;
+    --bad: #dc2626;
+    --violet: #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    padding: 16px 28px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    align-items: center;
+  }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  .sub { color: var(--muted); font-size: 12px; margin-left: 4px; }
+  .spacer { flex: 1; }
+  input[type=password], input[type=text] {
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 7px 10px;
+    font: inherit;
+    background: #fff;
+    color: var(--ink);
+    width: 210px;
+  }
+  button {
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--ink);
+    border-radius: 7px;
+    padding: 7px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { color: #fff; opacity: .9; }
+  main { padding: 22px 28px 40px; max-width: 1440px; margin: 0 auto; }
+  .notice {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+    border-radius: 9px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    margin-bottom: 18px;
+  }
+  .notice.error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 18px; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 11px; padding: 14px 16px; }
+  .kpi .label { color: var(--muted); font-size: 12px; }
+  .kpi .value { font-size: 25px; font-weight: 650; margin-top: 3px; letter-spacing: -.5px; }
+  .kpi .hint { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 11px; padding: 16px 18px; min-width: 0; }
+  .card h2 { font-size: 14px; margin: 0 0 3px; }
+  .card .desc { color: var(--muted); font-size: 11.5px; margin-bottom: 12px; }
+  svg { width: 100%; height: auto; display: block; overflow: visible; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: right; padding: 7px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .runs { list-style: none; padding: 0; margin: 0; max-height: 260px; overflow: auto; }
+  .runs li {
+    display: flex; gap: 10px; align-items: center;
+    padding: 8px 6px; border-bottom: 1px solid var(--line);
+    cursor: pointer; font-size: 12.5px;
+  }
+  .runs li:hover { background: #f1f5f9; }
+  .runs li.active { background: #eff6ff; color: var(--accent); }
+  .runs .id { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+  .runs .meta { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 26px 4px; text-align: center; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  footer { color: var(--muted); font-size: 11.5px; margin-top: 22px; line-height: 1.9; }
+  code { background: #eef2f7; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>agent-runtime <span class="sub">Trace / Eval 看板</span></h1>
+  <div class="spacer"></div>
+  <input type="password" id="token" placeholder="AUTH_TOKEN（未设置可留空）" autocomplete="off">
+  <button id="saveToken">保存</button>
+  <button class="primary" id="refresh">刷新数据</button>
+</header>
+
+<main>
+  <div id="notice" class="notice">正在加载…</div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>逐轮上下文与成本</h2>
+      <div class="desc">选中左下角某次 run，看每轮实际发给模型的 token 与花费；竖线标记压缩触发。</div>
+      <svg id="chartTurns" viewBox="0 0 600 230" role="img" aria-label="逐轮上下文曲线"></svg>
+      <div class="legend" id="turnsLegend"></div>
+    </section>
+
+    <section class="card">
+      <h2>评测 A/B 对照</h2>
+      <div class="desc">来自 reports/eval-summary.json；柱高为累计成本，标注为任务成功 / 总数。</div>
+      <svg id="chartAB" viewBox="0 0 600 230" role="img" aria-label="A/B 成本对照"></svg>
+      <div id="abTable"></div>
+    </section>
+
+    <section class="card">
+      <h2>折叠门槛敏感性</h2>
+      <div class="desc">只改 minResultChars 一个参数：门槛太低会逼出昂贵重读，太高则退化成基线。</div>
+      <svg id="chartSweep" viewBox="0 0 600 230" role="img" aria-label="参数扫描曲线"></svg>
+    </section>
+
+    <section class="card">
+      <h2>运行记录（Trace 持久化）</h2>
+      <div class="desc">来自 TRACE_DIR 下的 JSONL，进程重启后仍在。点击可加载逐轮明细。</div>
+      <ul class="runs" id="runList"></ul>
+    </section>
+  </div>
+
+  <footer id="footer"></footer>
+</main>
+<script src="/dashboard/app.js"></script>
+</body>
+</html>

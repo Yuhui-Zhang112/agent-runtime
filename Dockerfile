@@ -5,9 +5,11 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json tsconfig.build.json ./
+COPY tsconfig.json tsconfig.build.json tsconfig.web.json ./
 COPY src ./src
-RUN npm run build
+COPY web ./web
+COPY public ./public
+RUN npm run build:all
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
@@ -16,6 +18,10 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
+# 看板：HTML 壳 + build:web 编出来的 dashboard.js，二选一漏了页面就打不开
+COPY --from=builder /app/public ./public
+# 离线评测产物：/v1/eval 直接读它，容器里不需要重跑实验
+COPY reports ./reports
 
 # 不用 root 跑：容器被突破时，攻击者拿到的不是宿主机 root
 RUN addgroup -S app && adduser -S app -G app

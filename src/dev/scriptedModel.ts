@@ -16,25 +16,11 @@
  */
 
 import type { ModelProvider, ModelRequest, StreamEvent } from '../api/types.js'
-import type { Usage } from '../types/message.js'
+import { buildEvents } from '../core/streamEvents.js'
 
-export type ScriptedBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool_use'; id?: string; name: string; input: unknown }
-
-export interface ScriptedTurn {
-  /** 这一轮模型要输出的内容块 */
-  blocks: ScriptedBlock[]
-  usage?: Partial<Usage>
-  /** 切片大小：把文本和 JSON 切成这么大的片段发出去，模拟真实流式。默认 8 */
-  chunkSize?: number
-  /** 发到第 n 个事件后抛 AbortError —— 模拟用户按 Ctrl+C */
-  abortAfterEvents?: number
-  /** 发到第 n 个事件后抛普通错误 —— 模拟网络中断 */
-  failAfterEvents?: number
-  /** 每个事件之间的延迟（ms），用来让测试更接近真实节奏。默认 0 */
-  delayMs?: number
-}
+// 类型与事件构造统一住在 core/streamEvents.ts（生产层），这里 re-export 保持旧调用方零改动
+export type { ScriptedBlock, ScriptedTurn } from '../core/streamEvents.js'
+import type { ScriptedTurn } from '../core/streamEvents.js'
 
 export class ScriptedProvider implements ModelProvider {
   readonly name = 'scripted'
@@ -75,65 +61,7 @@ export class ScriptedProvider implements ModelProvider {
   }
 }
 
-// ── 事件构造 ────────────────────────────────────────────────
-
-/** 把一"幕"剧本展开成标准流事件序列。导出给评测模型复用，避免两套 SSE 构造逻辑 */
-export function buildEvents(turn: ScriptedTurn, chunkSize: number, _model: string): StreamEvent[] {
-  const events: StreamEvent[] = []
-
-  events.push({
-    type: 'message_start',
-    usage: {
-      input_tokens: turn.usage?.input_tokens ?? 1000,
-      output_tokens: 0,
-      ...turn.usage,
-    },
-  })
-
-  let hasToolUse = false
-  turn.blocks.forEach((block, index) => {
-    if (block.type === 'text') {
-      events.push({ type: 'content_block_start', index, block: { type: 'text', text: '' } })
-      for (const piece of chunk(block.text, chunkSize)) {
-        events.push({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: piece } })
-      }
-      events.push({ type: 'content_block_stop', index })
-    } else {
-      hasToolUse = true
-      const id = block.id ?? `tu_${index}`
-      events.push({
-        type: 'content_block_start',
-        index,
-        block: { type: 'tool_use', id, name: block.name, input: {} },
-      })
-      // 关键：把 JSON 切碎发出去，专门用来测"被腰斩的 JSON 能不能还原"
-      const json = JSON.stringify(block.input ?? {})
-      for (const piece of chunk(json, chunkSize)) {
-        events.push({
-          type: 'content_block_delta',
-          index,
-          delta: { type: 'input_json_delta', partial_json: piece },
-        })
-      }
-      events.push({ type: 'content_block_stop', index })
-    }
-  })
-
-  events.push({
-    type: 'message_delta',
-    stopReason: hasToolUse ? 'tool_use' : 'end_turn',
-    usage: { output_tokens: turn.usage?.output_tokens ?? 50 },
-  })
-  events.push({ type: 'message_stop' })
-  return events
-}
-
-function chunk(s: string, size: number): string[] {
-  if (s.length === 0) return ['']
-  const out: string[] = []
-  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size))
-  return out
-}
+// ── 辅助 ────────────────────────────────────────────────────
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
