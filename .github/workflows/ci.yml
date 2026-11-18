@@ -52,7 +52,22 @@ jobs:
         run: npm run eval:all
 
       - name: 评测产物可复现（重跑后 reports/ 不得有 diff）
-        run: git diff --exit-code -- reports/
+        # 失败时把差异写成 annotation：日志本身需要仓库 admin 才能下载，
+        # annotation 走 check-run API 可读，便于从外部直接定位漂移字段。
+        run: |
+          if git diff --quiet -- reports/; then
+            echo "reports/ 与提交内容一致"
+            exit 0
+          fi
+          git diff --numstat -- reports/
+          git diff -- reports/ | head -120
+          git diff --numstat -- reports/ | sed 's/%/%25/g' | while IFS= read -r line; do
+            echo "::error::变更 $line"
+          done
+          git diff -- reports/ | grep -E '^[+-][^+-]' | head -20 | sed 's/%/%25/g' | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
 
       - name: 构建产物（内核 + TypeScript 看板）
         run: npm run build:all
